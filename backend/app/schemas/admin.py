@@ -1,9 +1,13 @@
 """
-Schemas for admin provisioning, suspension, config, and audit.
+Schemas for admin provisioning, suspension, config, audit, and user deletion.
 """
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
+
+# ============================================================================
+# Invitations
+# ============================================================================
 
 class InvitationCreate(BaseModel):
     email: EmailStr
@@ -22,7 +26,7 @@ class InvitationResponse(BaseModel):
     jurisdiction_id: str | None
     expires_at: datetime
     is_used: bool
-    invitation_token: str | None = None  # dev only
+    invitation_token: str | None = None
 
 
 class AcceptInvitationRequest(BaseModel):
@@ -33,6 +37,10 @@ class AcceptInvitationRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=72)
 
 
+# ============================================================================
+# Suspend / reactivate
+# ============================================================================
+
 class SuspendRequest(BaseModel):
     reason: str | None = None
 
@@ -40,6 +48,27 @@ class SuspendRequest(BaseModel):
 class ReactivateRequest(BaseModel):
     reason: str | None = None
 
+
+# ============================================================================
+# User deletion (NEW — Super Admin only)
+# ============================================================================
+
+class UserDeletionRequest(BaseModel):
+    reason: str = Field(..., min_length=10, max_length=500)
+    confirm_email: EmailStr = Field(
+        ..., description="Must match the target user's email exactly"
+    )
+
+
+class UserDeletionResponse(BaseModel):
+    message: str
+    deleted_user_id: str
+    deleted_at: datetime
+
+
+# ============================================================================
+# System config
+# ============================================================================
 
 class ConfigUpdateRequest(BaseModel):
     value: dict
@@ -50,6 +79,10 @@ class ConfigEntry(BaseModel):
     key: str
     value: dict
 
+
+# ============================================================================
+# Admin action log
+# ============================================================================
 
 class AdminActionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -64,3 +97,36 @@ class AdminActionResponse(BaseModel):
     reason: str | None
     ip_address: str | None
     created_at: datetime
+
+
+# ============================================================================
+# Notification preferences (NEW)
+# ============================================================================
+
+class NotificationPreferencesUpdate(BaseModel):
+    email_enabled: bool | None = None
+    sms_enabled: bool | None = None
+    push_enabled: bool | None = None
+    in_app_enabled: bool | None = None
+    group_activity: bool | None = None
+    announcements: bool | None = None
+    elections: bool | None = None
+    assessments: bool | None = None
+    events: bool | None = None
+    opportunities: bool | None = None
+    marketing: bool | None = None
+
+
+class NotificationPreferencesResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    email_enabled: bool
+    sms_enabled: bool
+    push_enabled: bool
+    in_app_enabled: bool
+    group_activity: bool
+    announcements: bool
+    elections: bool
+    assessments: bool
+    events: bool
+    opportunities: bool
+    marketing: bool

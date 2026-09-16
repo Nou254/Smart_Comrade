@@ -1,5 +1,7 @@
 """
 Authentication endpoints.
+Supports 13 user types, CAPTCHA, environment detection, account deactivation,
+and per-endpoint rate limiting.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -9,10 +11,13 @@ from sqlalchemy.orm import Session
 from app.api.deps import (
     get_current_user, require_permission, bearer_scheme,
 )
+from app.core.rate_limit import rate_limit
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.user import (
-    StudentRegister, LecturerRegister, ExternalRegister, UserLogin,
+    StudentRegister, LecturerRegister, ExternalRegister,
+    InvestorRegister, OrganizationRegister, AlumniRegister,
+    MentorRegister, SpecialistRegister, UserLogin,
     UserResponse, ApprovalRequest, PendingApprovalResponse,
 )
 from app.schemas.auth_extra import (
@@ -26,11 +31,17 @@ from app.schemas.auth_extra import (
     TwoFactorEnableEmailRequest, TwoFactorEnableSmsRequest,
     TwoFactorResendChallengeRequest,
     StepUpRequest, StepUpResponse,
+    DeactivateAccountRequest, ReactivateAccountRequest, DeactivationResponse,
 )
-from app.schemas.admin import AcceptInvitationRequest
+from app.schemas.admin import (
+    AcceptInvitationRequest,
+    NotificationPreferencesUpdate, NotificationPreferencesResponse,
+)
 from app.services.auth_service import (
-    AuthError, TwoFactorRequired, Admin2FASetupRequired,
+    AuthError, TwoFactorRequired, Admin2FASetupRequired, CaptchaRequired,
     register_student, register_lecturer, register_external,
+    register_investor, register_organization, register_alumni,
+    register_mentor, register_specialist,
     login_user, list_pending_approvals, approve_user,
 )
 from app.services.verification_service import (
@@ -53,6 +64,7 @@ from app.services.two_factor_service import (
 )
 from app.services.admin_service import (
     accept_invitation, AdminError as InvitationError,
+    self_deactivate, self_reactivate,
 )
 from app.services.jurisdiction_service import is_admin_user
 from app.core.security import (
@@ -77,9 +89,7 @@ def _user_or_admin_setup(
     """
     Accepts either:
       - a normal session JWT (validated against the sessions table), OR
-      - an admin-2FA-setup token (issued during login when admin lacks 2FA)
-    Used by the /2fa/setup and /2fa/verify-setup endpoints so an admin
-    can complete 2FA enrolment without having a full session yet.
+      - an admin-2FA-setup token
     """
     if credentials is None:
         raise HTTPException(status_code=401, detail="Missing token.")
@@ -107,10 +117,15 @@ def _user_or_admin_setup(
 
 
 # ============================================================================
-# REGISTRATION
+# REGISTRATION — Core types
 # ============================================================================
 
-@router.post("/register/student", response_model=LoginResponse, status_code=201)
+@router.post(
+    "/register/student",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
 def register_student_endpoint(payload: StudentRegister, db: Session = Depends(get_db)):
     try:
         user = register_student(db, payload)
@@ -121,7 +136,12 @@ def register_student_endpoint(payload: StudentRegister, db: Session = Depends(ge
     return LoginResponse(user=UserResponse.model_validate(user).model_dump())
 
 
-@router.post("/register/lecturer", response_model=LoginResponse, status_code=201)
+@router.post(
+    "/register/lecturer",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
 def register_lecturer_endpoint(payload: LecturerRegister, db: Session = Depends(get_db)):
     try:
         user = register_lecturer(db, payload)
@@ -132,10 +152,97 @@ def register_lecturer_endpoint(payload: LecturerRegister, db: Session = Depends(
     return LoginResponse(user=UserResponse.model_validate(user).model_dump())
 
 
-@router.post("/register/external", response_model=LoginResponse, status_code=201)
+@router.post(
+    "/register/external",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
 def register_external_endpoint(payload: ExternalRegister, db: Session = Depends(get_db)):
     try:
         user = register_external(db, payload)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except VerificationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+
+
+# --- Distinct external subtype endpoints ---
+
+@router.post(
+    "/register/investor",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
+def register_investor_endpoint(payload: InvestorRegister, db: Session = Depends(get_db)):
+    try:
+        user = register_investor(db, payload)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except VerificationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+
+
+@router.post(
+    "/register/organization",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
+def register_organization_endpoint(payload: OrganizationRegister, db: Session = Depends(get_db)):
+    try:
+        user = register_organization(db, payload)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except VerificationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+
+
+@router.post(
+    "/register/alumni",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
+def register_alumni_endpoint(payload: AlumniRegister, db: Session = Depends(get_db)):
+    try:
+        user = register_alumni(db, payload)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except VerificationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+
+
+@router.post(
+    "/register/mentor",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
+def register_mentor_endpoint(payload: MentorRegister, db: Session = Depends(get_db)):
+    try:
+        user = register_mentor(db, payload)
+    except AuthError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    except VerificationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+
+
+@router.post(
+    "/register/specialist",
+    response_model=LoginResponse,
+    status_code=201,
+    dependencies=[Depends(rate_limit("auth.register.ip"))],
+)
+def register_specialist_endpoint(payload: SpecialistRegister, db: Session = Depends(get_db)):
+    try:
+        user = register_specialist(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
@@ -147,13 +254,23 @@ def register_external_endpoint(payload: ExternalRegister, db: Session = Depends(
 # LOGIN
 # ============================================================================
 
-@router.post("/login", response_model=LoginResponse)
+@router.post(
+    "/login",
+    response_model=LoginResponse,
+    dependencies=[Depends(rate_limit("auth.login.ip"))],
+)
 def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)):
     try:
-        user, token = login_user(
+        user, token, extras = login_user(
             db, payload,
             ip=_client_ip(request),
             user_agent=request.headers.get("user-agent"),
+            request=request,
+        )
+    except CaptchaRequired:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content={"requires_captcha": True, "detail": "CAPTCHA verification required."},
         )
     except Admin2FASetupRequired as e:
         return JSONResponse(
@@ -172,6 +289,10 @@ def login(payload: UserLogin, request: Request, db: Session = Depends(get_db)):
         access_token=token,
         token_type="bearer",
         user=UserResponse.model_validate(user).model_dump(),
+        redirect_to=extras.get("redirect_to"),
+        hub=extras.get("hub"),
+        environment=extras.get("environment"),
+        environment_warning=extras.get("environment_warning"),
     )
 
 
@@ -184,7 +305,11 @@ def me(current_user: User = Depends(get_current_user)):
 # EMAIL VERIFICATION
 # ============================================================================
 
-@router.post("/verify-email", response_model=LoginResponse)
+@router.post(
+    "/verify-email",
+    response_model=LoginResponse,
+    dependencies=[Depends(rate_limit("auth.otp.verify.email"))],
+)
 def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
     try:
         user = verify_email_otp(db, str(payload.email), payload.otp, payload.purpose)
@@ -193,7 +318,11 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
     return LoginResponse(user=UserResponse.model_validate(user).model_dump())
 
 
-@router.post("/resend-otp", response_model=OtpSentResponse)
+@router.post(
+    "/resend-otp",
+    response_model=OtpSentResponse,
+    dependencies=[Depends(rate_limit("auth.otp.resend.email"))],
+)
 def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)):
     user = db.query(User).filter(User.email == str(payload.email).lower().strip()).first()
     if not user:
@@ -213,6 +342,7 @@ def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)):
 def send_phone_otp(
     payload: SendPhoneOtpRequest,
     current_user: User = Depends(get_current_user),
+    _: None = Depends(rate_limit("auth.phone_otp.send.user")),
     db: Session = Depends(get_db),
 ):
     try:
@@ -243,28 +373,38 @@ def verify_phone(
 # PASSWORD RESET
 # ============================================================================
 
-@router.post("/forgot-password", response_model=MessageResponse)
-def forgot_password(payload: ForgotPasswordRequest, request: Request,
-                    db: Session = Depends(get_db)):
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+    dependencies=[Depends(rate_limit("auth.forgot_password.email"))],
+)
+def forgot_password(
+    payload: ForgotPasswordRequest, request: Request, db: Session = Depends(get_db),
+):
     create_password_reset(db, str(payload.email), request_ip=_client_ip(request))
     return MessageResponse(message="If an account exists, a reset link has been sent.")
 
 
 @router.post("/reset-password", response_model=MessageResponse)
-def reset_password(payload: ResetPasswordRequest, request: Request,
-                   db: Session = Depends(get_db)):
+def reset_password(
+    payload: ResetPasswordRequest, request: Request, db: Session = Depends(get_db),
+):
     try:
-        consume_password_reset(db, payload.token, payload.new_password,
-                               request_ip=_client_ip(request))
+        consume_password_reset(
+            db, payload.token, payload.new_password,
+            request_ip=_client_ip(request),
+        )
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     return MessageResponse(message="Password has been reset. Please log in again.")
 
 
 @router.post("/change-password", response_model=MessageResponse)
-def change_password(payload: ChangePasswordRequest,
-                    current_user: User = Depends(get_current_user),
-                    db: Session = Depends(get_db)):
+def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     if not verify_password(payload.current_password, current_user.password_hash):
         raise HTTPException(status_code=400, detail="Current password is incorrect.")
     current_user.password_hash = hash_password(payload.new_password)
@@ -279,26 +419,34 @@ def change_password(payload: ChangePasswordRequest,
 # ============================================================================
 
 @router.get("/sessions", response_model=list[SessionResponse])
-def get_my_sessions(current_user: User = Depends(get_current_user),
-                    db: Session = Depends(get_db)):
+def get_my_sessions(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     return list_sessions(db, current_user.id)
 
 
 @router.delete("/sessions/{session_id}", response_model=MessageResponse)
-def delete_session(session_id: str,
-                   current_user: User = Depends(get_current_user),
-                   db: Session = Depends(get_db)):
+def delete_session(
+    session_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     ok = revoke_session_by_id(db, current_user.id, session_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Session not found.")
-    log_auth_event(db, "session_revoked", user_id=current_user.id,
-                   email=current_user.email, event_data={"session_id": session_id})
+    log_auth_event(
+        db, "session_revoked", user_id=current_user.id,
+        email=current_user.email, event_data={"session_id": session_id},
+    )
     return MessageResponse(message="Session revoked.")
 
 
 @router.delete("/sessions", response_model=MessageResponse)
-def logout_all_devices(current_user: User = Depends(get_current_user),
-                       db: Session = Depends(get_db)):
+def logout_all_devices(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
     count = revoke_all_other_sessions(db, current_user.id)
     return MessageResponse(message=f"{count} session(s) revoked.")
 
@@ -379,8 +527,10 @@ def two_factor_resend(
     if not user:
         raise HTTPException(status_code=404, detail="User not found.")
     try:
-        result = resend_login_challenge(db, user, ip=_client_ip(request),
-                                        ua=request.headers.get("user-agent"))
+        result = resend_login_challenge(
+            db, user,
+            ip=_client_ip(request), ua=request.headers.get("user-agent"),
+        )
     except TwoFactorError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     return MessageResponse(message=result["message"])
@@ -408,7 +558,6 @@ def two_factor_verify_login(
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid 2FA code.")
 
-    # Admin sessions are shorter (12h vs 24h)
     is_admin = is_admin_user(db, user.id)
     expiry = ADMIN_SESSION_MINUTES if is_admin else DEFAULT_SESSION_MINUTES
 
@@ -418,10 +567,27 @@ def two_factor_verify_login(
         user_agent=request.headers.get("user-agent"),
         expires_minutes=expiry,
     )
+
+    from app.services.hub_router import resolve_hub
+    from app.services.environment_service import analyze as analyze_env
+    hub_target = resolve_hub(db, user.id, user.user_type)
+    extras = {"redirect_to": hub_target.redirect_to, "hub": hub_target.hub}
+    try:
+        env_info = analyze_env(user.user_type, request)
+        extras["environment"] = env_info.environment.value
+        if env_info.warning:
+            extras["environment_warning"] = env_info.warning
+    except Exception:
+        pass
+
     return LoginResponse(
         access_token=token,
         token_type="bearer",
         user=UserResponse.model_validate(user).model_dump(),
+        redirect_to=extras.get("redirect_to"),
+        hub=extras.get("hub"),
+        environment=extras.get("environment"),
+        environment_warning=extras.get("environment_warning"),
     )
 
 
@@ -459,12 +625,9 @@ def step_up(
     payload: StepUpRequest,
     request: Request,
     current_user: User = Depends(get_current_user),
+    _: None = Depends(rate_limit("auth.step_up.user")),
     db: Session = Depends(get_db),
 ):
-    """
-    Re-verify password + 2FA code to obtain a short-lived step-up token
-    for sensitive admin actions.
-    """
     if not verify_password(payload.password, current_user.password_hash):
         raise HTTPException(status_code=400, detail="Password is incorrect.")
     if not current_user.two_factor_enabled:
@@ -479,7 +642,7 @@ def step_up(
         raise HTTPException(status_code=401, detail="Invalid 2FA code.")
 
     token = create_step_up_token(
-        current_user.id, scope=payload.scope, expires_minutes=10
+        current_user.id, scope=payload.scope, expires_minutes=10,
     )
     log_auth_event(
         db, "step_up_issued",
@@ -489,7 +652,7 @@ def step_up(
         event_data={"scope": payload.scope},
     )
     return StepUpResponse(
-        step_up_token=token, scope=payload.scope, expires_in_minutes=10
+        step_up_token=token, scope=payload.scope, expires_in_minutes=10,
     )
 
 
@@ -544,3 +707,100 @@ def approve_or_reject(
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     return user
+
+
+# ============================================================================
+# ACCOUNT DEACTIVATION
+# ============================================================================
+
+@router.post("/deactivate", response_model=DeactivationResponse)
+def deactivate_account(
+    payload: DeactivateAccountRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if not payload.confirm:
+        raise HTTPException(status_code=400, detail="You must confirm deactivation.")
+    try:
+        user = self_deactivate(db, current_user, payload.password, payload.reason)
+    except InvitationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return DeactivationResponse(
+        message="Account deactivated. You may reactivate within 30 days.",
+        deactivated_at=user.deactivated_at,
+        reactivation_deadline=user.reactivation_deadline,
+        grace_period_days=30,
+    )
+
+
+@router.post("/reactivate", response_model=LoginResponse)
+def reactivate_account(
+    payload: ReactivateAccountRequest,
+    db: Session = Depends(get_db),
+):
+    raise HTTPException(
+        status_code=400,
+        detail="Provide your email when reactivating. Use POST /auth/reactivate/{email}",
+    )
+
+
+@router.post("/reactivate/{email}", response_model=LoginResponse)
+def reactivate_account_by_email(
+    email: str,
+    payload: ReactivateAccountRequest,
+    db: Session = Depends(get_db),
+):
+    try:
+        user = self_reactivate(db, email, payload.password)
+    except InvitationError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+
+
+# ============================================================================
+# NOTIFICATION PREFERENCES
+# ============================================================================
+
+@router.get("/notification-preferences", response_model=NotificationPreferencesResponse)
+def get_notification_preferences(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.models.notification_preference import NotificationPreference
+    prefs = (
+        db.query(NotificationPreference)
+        .filter(NotificationPreference.user_id == current_user.id)
+        .first()
+    )
+    if not prefs:
+        prefs = NotificationPreference(user_id=current_user.id)
+        db.add(prefs)
+        db.commit()
+        db.refresh(prefs)
+    return prefs
+
+
+@router.patch("/notification-preferences", response_model=NotificationPreferencesResponse)
+def update_notification_preferences(
+    payload: NotificationPreferencesUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    from app.models.notification_preference import NotificationPreference
+    prefs = (
+        db.query(NotificationPreference)
+        .filter(NotificationPreference.user_id == current_user.id)
+        .first()
+    )
+    if not prefs:
+        prefs = NotificationPreference(user_id=current_user.id)
+        db.add(prefs)
+        db.flush()
+
+    for field, value in payload.model_dump(exclude_unset=True).items():
+        if value is not None:
+            setattr(prefs, field, value)
+
+    db.commit()
+    db.refresh(prefs)
+    return prefs

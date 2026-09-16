@@ -99,6 +99,12 @@ class Session(Base, UUIDMixin, TimestampMixin):
     user_agent: Mapped[str | None] = mapped_column(Text, nullable=True)
     device_label: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
+    # --- Session metadata (NEW) ---
+    device_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    device_os: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    device_browser: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    location: Mapped[str | None] = mapped_column(String(160), nullable=True)
+
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

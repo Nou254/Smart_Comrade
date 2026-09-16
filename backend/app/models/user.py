@@ -2,7 +2,8 @@
 User model — Module 001: Identity & Authentication.
 """
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, ForeignKey, String
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDMixin
@@ -65,6 +66,14 @@ class User(Base, UUIDMixin, TimestampMixin):
     )
     rejection_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
+    # --- Rejection Metadata (NEW) ---
+    rejected_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rejected_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
     # --- Security ---
     two_factor_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     two_factor_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -76,6 +85,30 @@ class User(Base, UUIDMixin, TimestampMixin):
     locked_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+
+    # --- Known Devices (NEW — for security alerts) ---
+    # JSONB list of fingerprint strings like "mobile|Android|Chrome"
+    known_devices: Mapped[list | None] = mapped_column(
+        JSONB, nullable=True, default=list,
+    )
+
+    # --- Account Lifecycle (NEW) ---
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reactivation_deadline: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # --- Terms / Privacy Acceptance (NEW) ---
+    tos_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    tos_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    privacy_accepted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    privacy_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     # --- Tracking ---
     last_login_at: Mapped[datetime | None] = mapped_column(

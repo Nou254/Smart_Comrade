@@ -1,19 +1,56 @@
 """
 Session management: create on login, revoke on logout, list active sessions.
-Supports per-call session length overrides (admin vs user).
+Adds device metadata, concurrent session limit, and last-seen tracking.
 """
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session as DBSession
 
 from app.core.security import create_access_token, hash_token
+from app.core.config import settings
+from app.core.user_agent_parser import parse as parse_ua
 from app.models.user import User
 from app.models.auth_extension import Session as SessionModel
 
 
-# Default session lengths in minutes
 DEFAULT_SESSION_MINUTES = 1440   # 24 hours (regular users)
 ADMIN_SESSION_MINUTES = 720      # 12 hours (admins)
+MAX_CONCURRENT_SESSIONS = 5      # per spec §11.2
+
+
+class SessionError(Exception):
+    def __init__(self, message: str, status_code: int = 400):
+        self.message = message
+        self.status_code = status_code
+        super().__init__(message)
+
+
+def _count_active_sessions(db: DBSession, user_id: str) -> int:
+    now = datetime.now(timezone.utc)
+    return (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.user_id == user_id,
+            SessionModel.is_revoked.is_(False),
+            SessionModel.expires_at > now,
+        )
+        .count()
+    )
+
+
+def _evict_oldest_session(db: DBSession, user_id: str) -> None:
+    oldest = (
+        db.query(SessionModel)
+        .filter(
+            SessionModel.user_id == user_id,
+            SessionModel.is_revoked.is_(False),
+        )
+        .order_by(SessionModel.created_at.asc())
+        .first()
+    )
+    if oldest:
+        oldest.is_revoked = True
+        oldest.revoked_at = datetime.now(timezone.utc)
 
 
 def create_session(
@@ -25,21 +62,46 @@ def create_session(
     expires_minutes: int | None = None,
 ) -> tuple[str, SessionModel]:
     """
-    Create a JWT + session record.
+    Create a JWT + session record with device metadata.
+    Enforces max concurrent sessions per user.
     Returns (plain_token, session_record).
-    If expires_minutes is None, uses DEFAULT_SESSION_MINUTES.
     """
+    # Enforce concurrent session limit
+    active_count = _count_active_sessions(db, user.id)
+    if active_count >= MAX_CONCURRENT_SESSIONS:
+        # Evict oldest to make room
+        _evict_oldest_session(db, user.id)
+
     minutes = expires_minutes if expires_minutes is not None else DEFAULT_SESSION_MINUTES
 
     token = create_access_token(subject=user.id, expires_minutes=minutes)
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=minutes)
+
+    # Parse device metadata
+    parsed = parse_ua(user_agent)
+    device_type = parsed.device_type
+    device_os = parsed.os
+    device_browser = parsed.browser
+
+    # Best-effort geo lookup (fails silently)
+    location = None
+    if ip_address and settings.RATE_LIMIT_ENABLED:  # only if we have networking
+        try:
+            from app.services.geo_service import lookup as geo_lookup
+            location = geo_lookup(ip_address)
+        except Exception:
+            pass
 
     session = SessionModel(
         user_id=user.id,
         token_hash=hash_token(token),
         ip_address=ip_address,
         user_agent=user_agent,
-        device_label=device_label,
+        device_label=device_label or parsed.friendly,
+        device_type=device_type,
+        device_os=device_os,
+        device_browser=device_browser,
+        location=location,
         expires_at=expires_at,
         last_seen_at=datetime.now(timezone.utc),
     )
@@ -82,8 +144,9 @@ def revoke_session(db: DBSession, token: str) -> None:
         db.commit()
 
 
-def revoke_all_other_sessions(db: DBSession, user_id: str,
-                              keep_token: str | None = None) -> int:
+def revoke_all_other_sessions(
+    db: DBSession, user_id: str, keep_token: str | None = None,
+) -> int:
     th = hash_token(keep_token) if keep_token else None
     q = db.query(SessionModel).filter(
         SessionModel.user_id == user_id,
@@ -91,7 +154,10 @@ def revoke_all_other_sessions(db: DBSession, user_id: str,
     )
     if th:
         q = q.filter(SessionModel.token_hash != th)
-    count = q.update({"is_revoked": True, "revoked_at": datetime.now(timezone.utc)})
+    count = q.update({
+        "is_revoked": True,
+        "revoked_at": datetime.now(timezone.utc),
+    })
     db.commit()
     return count
 

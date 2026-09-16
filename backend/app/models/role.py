@@ -26,6 +26,17 @@ class Role(Base, UUIDMixin, TimestampMixin):
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     level: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
+    # --- Role classification (NEW) ---
+    # student_base | student_leadership | external_base | external_addon | platform
+    role_class: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="student_base", index=True,
+    )
+    # --- Leadership flag (NEW) ---
+    # At most one active leadership role per user is enforced at the service layer.
+    is_leadership: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True,
+    )
+
     role_permissions: Mapped[list["RolePermission"]] = relationship(
         "RolePermission", back_populates="role", cascade="all, delete-orphan"
     )
@@ -101,6 +112,7 @@ class UserRole(Base, UUIDMixin, TimestampMixin):
 
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
     # active | pending | expired | suspended | revoked
+    # | ended_by_new_assignment | vacated_for_higher_office | ended_by_election | resigned
 
     start_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_date: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

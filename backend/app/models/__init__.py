@@ -25,6 +25,10 @@ from app.models.upload import (
     TimetableUpload, UploadFile, UploadScannedPage, ExtractedUnit,
 )
 
+# NEW — Module 001 completeness
+from app.models.external_profile import ExternalProfile
+from app.models.notification_preference import NotificationPreference
+
 __all__ = [
     "Base", "User",
     "Role", "Permission", "RolePermission", "UserRole",
@@ -39,4 +43,6 @@ __all__ = [
     "AuthAuditLog", "TwoFactorChallenge",
     "AdminActionLog", "SystemConfig", "AdminInvitation",
     "TimetableUpload", "UploadFile", "UploadScannedPage", "ExtractedUnit",
+    # NEW
+    "ExternalProfile", "NotificationPreference",
 ]

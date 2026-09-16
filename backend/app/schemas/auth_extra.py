@@ -1,11 +1,14 @@
 """
-Schemas for OTP verification, password reset, sessions, 2FA, phone verify, step-up.
+Schemas for OTP verification, password reset, sessions, 2FA, phone verify,
+step-up, account deactivation, and login response.
 """
 from datetime import datetime
 from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
-# --- Email Verification ---
+# ============================================================================
+# Email verification
+# ============================================================================
 
 class VerifyEmailRequest(BaseModel):
     email: EmailStr
@@ -25,7 +28,9 @@ class OtpSentResponse(BaseModel):
     expires_in_minutes: int
 
 
-# --- Phone Verification ---
+# ============================================================================
+# Phone verification
+# ============================================================================
 
 class SendPhoneOtpRequest(BaseModel):
     phone: str | None = None
@@ -35,7 +40,9 @@ class VerifyPhoneRequest(BaseModel):
     otp: str = Field(..., min_length=6, max_length=6)
 
 
-# --- Password Reset ---
+# ============================================================================
+# Password reset
+# ============================================================================
 
 class ForgotPasswordRequest(BaseModel):
     email: EmailStr
@@ -51,7 +58,9 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=8, max_length=72)
 
 
-# --- Sessions ---
+# ============================================================================
+# Sessions
+# ============================================================================
 
 class SessionResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -59,6 +68,11 @@ class SessionResponse(BaseModel):
     ip_address: str | None
     user_agent: str | None
     device_label: str | None
+    # --- Session metadata (NEW) ---
+    device_type: str | None = None
+    device_os: str | None = None
+    device_browser: str | None = None
+    location: str | None = None
     created_at: datetime
     last_seen_at: datetime | None
     expires_at: datetime
@@ -69,7 +83,9 @@ class MessageResponse(BaseModel):
     message: str
 
 
-# --- 2FA ---
+# ============================================================================
+# 2FA
+# ============================================================================
 
 class TwoFactorSetupResponse(BaseModel):
     secret: str
@@ -100,21 +116,20 @@ class TwoFactorStatusResponse(BaseModel):
 
 
 class TwoFactorEnableEmailRequest(BaseModel):
-    """Enable email OTP as the 2FA method. Email must already be verified."""
     pass
 
 
 class TwoFactorEnableSmsRequest(BaseModel):
-    """Enable SMS OTP as the 2FA method. Phone must already be verified."""
     pass
 
 
 class TwoFactorResendChallengeRequest(BaseModel):
-    """Resend a fresh email/SMS 2FA code during login."""
     temp_token: str
 
 
-# --- Step-up authentication ---
+# ============================================================================
+# Step-up authentication
+# ============================================================================
 
 class StepUpRequest(BaseModel):
     password: str
@@ -128,16 +143,50 @@ class StepUpResponse(BaseModel):
     expires_in_minutes: int
 
 
-# --- Login response union ---
+# ============================================================================
+# Account deactivation (NEW)
+# ============================================================================
+
+class DeactivateAccountRequest(BaseModel):
+    password: str
+    reason: str | None = Field(None, max_length=500)
+    confirm: bool = Field(..., description="Must be true to confirm deactivation")
+
+
+class ReactivateAccountRequest(BaseModel):
+    password: str
+
+
+class DeactivationResponse(BaseModel):
+    message: str
+    deactivated_at: datetime
+    reactivation_deadline: datetime
+    grace_period_days: int
+
+
+# ============================================================================
+# Login response (extended)
+# ============================================================================
 
 class LoginResponse(BaseModel):
     # Success case
     access_token: str | None = None
     token_type: str | None = "bearer"
     user: dict | None = None
+
     # 2FA challenge case
     requires_2fa: bool = False
     temp_token: str | None = None
+
     # Admin 2FA setup required case
     requires_admin_2fa_setup: bool = False
     setup_token: str | None = None
+
+    # --- Redirect + environment (NEW) ---
+    redirect_to: str | None = None
+    hub: str | None = None
+    environment_warning: str | None = None
+    environment: str | None = None
+
+    # --- CAPTCHA required (NEW) ---
+    requires_captcha: bool = False

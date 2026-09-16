@@ -5,7 +5,9 @@ from datetime import datetime
 from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 
-# ---------- Request schemas ----------
+# ============================================================================
+# REGISTRATION REQUEST SCHEMAS
+# ============================================================================
 
 class StudentRegister(BaseModel):
     """Student registration — low barrier, auto-active after email verification."""
@@ -19,23 +21,32 @@ class StudentRegister(BaseModel):
     course_id: str | None = None
     academic_year_id: str | None = None
     semester_id: str | None = None
+    # --- Terms / Privacy acceptance (NEW) ---
+    tos_accepted: bool = Field(..., description="Must be true to register")
+    privacy_accepted: bool = Field(..., description="Must be true to register")
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
 
 
 class LecturerRegister(BaseModel):
     """Lecturer registration — institutional email + admin approval required."""
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
-    email: EmailStr                                # personal or login email
-    institutional_email: EmailStr                  # must match institution domain
+    email: EmailStr
+    institutional_email: EmailStr
     phone: str | None = Field(None, max_length=20)
     password: str = Field(..., min_length=8, max_length=72)
     institution_id: str
     department: str | None = Field(None, max_length=150)
     title: str = Field(..., description="Lecturer | Senior Lecturer | Professor | Assistant Lecturer")
+    tos_accepted: bool = Field(...)
+    privacy_accepted: bool = Field(...)
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
 
 
 class ExternalRegister(BaseModel):
-    """External user registration — approval required."""
+    """Generic external registration — kept for backward compatibility."""
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
@@ -48,14 +59,114 @@ class ExternalRegister(BaseModel):
     organization_name: str | None = None
     profession: str | None = None
     expertise: str | None = None
+    tos_accepted: bool = Field(...)
+    privacy_accepted: bool = Field(...)
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
 
+
+# --- External subtype-specific schemas (NEW) ---
+
+class InvestorRegister(BaseModel):
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    phone: str | None = Field(None, max_length=20)
+    password: str = Field(..., min_length=8, max_length=72)
+    # Role-specific fields
+    organization_name: str = Field(..., min_length=1, max_length=255)
+    role_in_organization: str | None = Field(None, max_length=120)
+    investment_focus: str | None = Field(None, max_length=2000)
+    tos_accepted: bool = Field(...)
+    privacy_accepted: bool = Field(...)
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
+
+
+class OrganizationRegister(BaseModel):
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    phone: str | None = Field(None, max_length=20)
+    password: str = Field(..., min_length=8, max_length=72)
+    # Organization
+    organization_name: str = Field(..., min_length=1, max_length=255)
+    organization_type: str = Field(..., description="Company | NGO | Government | Institution")
+    industry: str = Field(..., description="Technology | Education | Healthcare | ...")
+    registration_number: str | None = Field(None, max_length=64)
+    # Contact
+    contact_name: str | None = Field(None, max_length=160)
+    contact_email: EmailStr | None = None
+    contact_phone: str | None = Field(None, max_length=32)
+    tos_accepted: bool = Field(...)
+    privacy_accepted: bool = Field(...)
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
+
+
+class AlumniRegister(BaseModel):
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    phone: str | None = Field(None, max_length=20)
+    password: str = Field(..., min_length=8, max_length=72)
+    # Background
+    former_institution: str = Field(..., min_length=1, max_length=255)
+    graduation_year: int = Field(..., ge=1950, le=2100)
+    current_profession: str | None = Field(None, max_length=160)
+    expertise: str | None = Field(None, max_length=2000)
+    tos_accepted: bool = Field(...)
+    privacy_accepted: bool = Field(...)
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
+
+
+class MentorRegister(BaseModel):
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    phone: str | None = Field(None, max_length=20)
+    password: str = Field(..., min_length=8, max_length=72)
+    # Professional
+    profession: str = Field(..., min_length=1, max_length=160)
+    areas_of_expertise: list[str] = Field(..., min_length=1)
+    experience_summary: str = Field(..., min_length=10, max_length=1000)
+    availability: str = Field(..., description="Weekdays | Weekends | Evenings | Flexible")
+    tos_accepted: bool = Field(...)
+    privacy_accepted: bool = Field(...)
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
+
+
+class SpecialistRegister(BaseModel):
+    first_name: str = Field(..., min_length=1, max_length=100)
+    last_name: str = Field(..., min_length=1, max_length=100)
+    email: EmailStr
+    phone: str | None = Field(None, max_length=20)
+    password: str = Field(..., min_length=8, max_length=72)
+    # Expertise
+    field_of_expertise: str = Field(..., min_length=1, max_length=160)
+    affiliated_organization: str | None = Field(None, max_length=255)
+    tos_accepted: bool = Field(...)
+    privacy_accepted: bool = Field(...)
+    tos_version: str | None = Field("1.0", max_length=32)
+    privacy_version: str | None = Field("1.0", max_length=32)
+
+
+# ============================================================================
+# LOGIN / TOKEN
+# ============================================================================
 
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
+    # --- CAPTCHA (NEW) — required only when threshold is hit ---
+    captcha_token: str | None = None
 
 
-# ---------- Response schemas ----------
+# ============================================================================
+# RESPONSE SCHEMAS
+# ============================================================================
 
 class UserResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -73,6 +184,7 @@ class UserResponse(BaseModel):
     domain_verified: bool
     institution_id: str | None
     two_factor_enabled: bool
+    two_factor_method: str | None = None
     created_at: datetime
 
 
@@ -97,9 +209,48 @@ class PendingApprovalResponse(BaseModel):
     email: str
     institutional_email: str | None
     user_type: str
+    external_subtype: str | None = None
     institution_id: str | None
     department: str | None
     title: str | None
     domain_verified: bool
     account_status: str
+    created_at: datetime
+
+
+# --- External profile response (NEW) ---
+
+class ExternalProfileResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    user_id: str
+    external_subtype: str
+    # Investor
+    investment_focus: str | None = None
+    investor_org_name: str | None = None
+    investor_role: str | None = None
+    # Organization
+    organization_name: str | None = None
+    organization_type: str | None = None
+    industry: str | None = None
+    registration_number: str | None = None
+    contact_name: str | None = None
+    contact_email: str | None = None
+    contact_phone: str | None = None
+    # Alumni
+    former_institution: str | None = None
+    graduation_year: int | None = None
+    current_profession: str | None = None
+    alumni_expertise: str | None = None
+    # Mentor
+    mentor_profession: str | None = None
+    mentor_expertise: str | None = None
+    mentor_experience_summary: str | None = None
+    mentor_availability: str | None = None
+    # Specialist
+    expertise_field: str | None = None
+    affiliation: str | None = None
+    # Verification
+    verification_status: str
     created_at: datetime

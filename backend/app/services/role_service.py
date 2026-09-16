@@ -1,5 +1,5 @@
 """
-Role management business logic + permission resolution.
+Role management business logic + permission resolution + role exclusivity.
 """
 from datetime import datetime, timezone
 from sqlalchemy.orm import Session
@@ -38,6 +38,61 @@ def get_user_roles(db: Session, user_id: str) -> list[UserRole]:
     )
 
 
+# ============================================================================
+# Exclusivity helpers
+# ============================================================================
+
+def _get_active_leadership_role(db: Session, user_id: str) -> UserRole | None:
+    """Return the user's single active leadership role (if any)."""
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(UserRole)
+        .join(Role, UserRole.role_id == Role.id)
+        .filter(
+            UserRole.user_id == user_id,
+            UserRole.status == "active",
+            Role.is_leadership.is_(True),
+        )
+        .all()
+    )
+    for r in rows:
+        if r.end_date is None or r.end_date > now:
+            return r
+    return None
+
+
+def enforce_exclusivity(
+    db: Session, user_id: str, new_role: Role,
+    *,
+    acting_user_id: str | None = None,
+    reason: str | None = None,
+) -> None:
+    """
+    Enforce role exclusivity rules:
+      - At most one active leadership role per user
+      - External base roles cannot stack with each other
+      - Student leadership roles cannot stack with external roles
+    """
+    now = datetime.now(timezone.utc)
+
+    if new_role.is_leadership:
+        existing = _get_active_leadership_role(db, user_id)
+        if existing:
+            existing.status = "ended_by_new_assignment"
+            existing.end_date = now
+            existing.notes = (
+                (existing.notes or "")
+                + f"\n[Auto-ended] Replaced by {new_role.code}"
+            )
+            if reason:
+                existing.notes += f" — {reason}"
+            db.commit()
+
+
+# ============================================================================
+# Assign / revoke
+# ============================================================================
+
 def assign_role(
     db: Session,
     user_id: str,
@@ -69,6 +124,9 @@ def assign_role(
         raise RoleError(
             f"User already has active role '{role_code}' in this jurisdiction.", 409
         )
+
+    # Enforce exclusivity BEFORE creating new assignment
+    enforce_exclusivity(db, user_id, role, acting_user_id=granted_by, reason=notes)
 
     assignment = UserRole(
         user_id=user_id,
@@ -110,11 +168,15 @@ def revoke_role(
     return assignment
 
 
-def resolve_user_permissions(db: Session, user_id: str) -> tuple[list[str], list[str]]:
+# ============================================================================
+# Permission resolution
+# ============================================================================
+
+def resolve_user_permissions(
+    db: Session, user_id: str,
+) -> tuple[list[str], list[str]]:
     """
     Return (role_codes, permission_codes) for a user's ACTIVE roles.
-    A role is active if: status == 'active'
-                         AND (end_date is None OR end_date > now)
     """
     now = datetime.now(timezone.utc)
     rows = (
@@ -144,6 +206,5 @@ def resolve_user_permissions(db: Session, user_id: str) -> tuple[list[str], list
 
 
 def user_has_permission(db: Session, user_id: str, required: str) -> bool:
-    """True if user has the required permission under any active role."""
     _, perms = resolve_user_permissions(db, user_id)
     return required in perms

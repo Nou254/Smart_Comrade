@@ -17,7 +17,7 @@ from app.schemas.admin import (
     AcceptInvitationRequest,
     SuspendRequest, ReactivateRequest,
     ConfigUpdateRequest, ConfigEntry,
-    AdminActionResponse,
+    AdminActionResponse,UserDeletionRequest, 
 )
 from app.services.admin_service import (
     AdminError, create_invitation, accept_invitation,
@@ -201,6 +201,36 @@ def admin_set_config(
     )
     return ConfigEntry(key=key, value=new)
 
+# ============================================================================
+# User deletion (Super Admin only)
+# ============================================================================
+
+@router.delete("/users/{resource_id}", response_model=dict)
+def admin_delete_user(
+    resource_id: str,
+    payload: UserDeletionRequest,
+    request: Request,
+    current_user: User = Depends(require_super_admin),
+    db: Session = Depends(get_db),
+):
+    from app.services.admin_service import AdminError as AdminSvcError, delete_user
+    try:
+        result = delete_user(
+            db,
+            target_user_id=resource_id,
+            actor_id=current_user.id,
+            reason=payload.reason,
+            confirm_email=str(payload.confirm_email),
+            ip=_ip(request),
+            ua=_ua(request),
+        )
+    except AdminSvcError as e:
+        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return {
+        "message": "User permanently deleted.",
+        "deleted_user_id": result["deleted_user_id"],
+        "deleted_at": result["deleted_at"].isoformat(),
+    }
 
 # ============================================================================
 # Admin action log

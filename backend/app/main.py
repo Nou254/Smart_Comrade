@@ -1,8 +1,7 @@
 from fastapi import FastAPI
 
-from app.api import auth, admin_roles, academic, group, admin
-from app.core.config import settings
 from app.api import auth, admin_roles, academic, group, admin, upload
+from app.core.config import settings
 
 app = FastAPI(
     title=settings.APP_NAME,
