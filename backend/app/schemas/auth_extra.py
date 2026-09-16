@@ -190,3 +190,6 @@ class LoginResponse(BaseModel):
 
     # --- CAPTCHA required (NEW) ---
     requires_captcha: bool = False
+
+    #---Pending registration ----
+    requires_verification:bool = False

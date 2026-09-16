@@ -1,6 +1,9 @@
 """
 Email + phone verification and password reset services.
-Uses real SMTP/SMS via app.core.notifications.
+
+Two flows:
+  1. Registration   → data lives in cache, promoted to `users` on verify
+  2. Other purposes → existing users, DB-backed verification
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -16,9 +19,12 @@ from app.core.security import (
     generate_reset_token, hash_token, hash_password,
 )
 from app.models.user import User
+from app.models.external_profile import ExternalProfile
+from app.models.role import Role, UserRole
 from app.models.auth_extension import (
     EmailVerification, PhoneVerification, PasswordReset, Session as SessionModel,
 )
+from app.services import registration_cache
 from app.services.audit_service import log_auth_event
 
 logger = logging.getLogger(__name__)
@@ -38,10 +44,154 @@ class VerificationError(Exception):
 
 
 # ============================================================================
-# EMAIL
+# REGISTRATION — cache-based
+# ============================================================================
+
+def resend_registration_otp(email: str) -> None:
+    """Generate a fresh OTP for a pending registration in cache."""
+    record = registration_cache.get_pending(email)
+    if not record:
+        raise VerificationError("No pending registration found for this email.", 404)
+
+    if record.get("otp_resends", 0) >= 3:
+        raise VerificationError(
+            "Too many OTP resends. Please wait or restart registration.", 429
+        )
+
+    otp = generate_otp()
+    otp_hash_val = hash_otp(otp)
+    otp_expires = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
+
+    registration_cache.update_pending(
+        email,
+        otp_hash=otp_hash_val,
+        otp_expires_at=otp_expires.isoformat(),
+        otp_attempts=0,
+        otp_resends=record.get("otp_resends", 0) + 1,
+    )
+
+    send_otp_email(email, otp, purpose="registration")
+
+
+def verify_pending_registration(db: Session, email: str, otp: str) -> User:
+    """
+    Verify OTP against cache; on success, promote the pending record into
+    the `users` table and clear the cache entry.
+    """
+    record = registration_cache.get_pending(email)
+    if not record:
+        raise VerificationError(
+            "No pending registration found for this email. "
+            "It may have expired — please register again.",
+            404,
+        )
+
+    otp_expires_at = datetime.fromisoformat(record["otp_expires_at"])
+    if otp_expires_at < datetime.now(timezone.utc):
+        raise VerificationError("OTP has expired. Please request a new one.", 410)
+
+    if record.get("otp_attempts", 0) >= OTP_MAX_ATTEMPTS:
+        raise VerificationError("Too many failed attempts. Request a new OTP.", 429)
+
+    if not verify_otp(otp, record["otp_hash"]):
+        registration_cache.update_pending(
+            email, otp_attempts=record.get("otp_attempts", 0) + 1,
+        )
+        remaining = OTP_MAX_ATTEMPTS - (record.get("otp_attempts", 0) + 1)
+        raise VerificationError(
+            f"Invalid OTP. {remaining} attempts remaining.", 400
+        )
+
+    # Uniqueness re-check (race protection)
+    if db.query(User).filter(User.email == record["email"]).first():
+        registration_cache.delete_pending(email)
+        raise VerificationError("This email is already registered.", 409)
+    if record.get("phone") and db.query(User).filter(User.phone == record["phone"]).first():
+        registration_cache.delete_pending(email)
+        raise VerificationError("This phone number is already registered.", 409)
+
+    # Promotion decision
+    user_type = record["user_type"]
+    external_subtype = record.get("external_subtype")
+    is_auto_active = (
+        user_type == "student"
+        or (user_type == "external" and external_subtype == "alumni")
+    )
+
+    user = User(
+        first_name=record["first_name"],
+        last_name=record["last_name"],
+        email=record["email"],
+        phone=record.get("phone"),
+        password_hash=record["password_hash"],
+        user_type=user_type,
+        external_subtype=external_subtype,
+        institution_id=record.get("institution_id"),
+        institutional_email=record.get("institutional_email"),
+        department=record.get("department"),
+        title=record.get("title"),
+        domain_verified=record.get("domain_verified", False),
+        account_status="active" if is_auto_active else "pending_approval",
+        email_verified=True,
+        phone_verified=False,
+    )
+
+    if record.get("tos_version"):
+        user.tos_accepted_at = datetime.fromisoformat(record["tos_accepted_at"])
+        user.tos_version = record["tos_version"]
+    if record.get("privacy_version"):
+        user.privacy_accepted_at = datetime.fromisoformat(record["privacy_accepted_at"])
+        user.privacy_version = record["privacy_version"]
+
+    db.add(user)
+    db.flush()
+
+    # Base role assignment
+    role_code_map = {
+        "student": "student",
+        "lecturer": "lecturer",
+        "external": "external_user",
+    }
+    base_role_code = role_code_map.get(user.user_type)
+    if base_role_code:
+        role = db.query(Role).filter(Role.code == base_role_code).first()
+        if role:
+            role_status = "active" if is_auto_active else "pending"
+            db.add(UserRole(
+                user_id=user.id, role_id=role.id,
+                jurisdiction_type="self", jurisdiction_id=None,
+                status=role_status,
+                start_date=datetime.now(timezone.utc),
+                notes=f"Auto-assigned on {user.user_type} registration",
+            ))
+
+    # External profile
+    if user.user_type == "external" and external_subtype:
+        profile = ExternalProfile(
+            user_id=user.id,
+            external_subtype=external_subtype,
+            verification_status="approved" if external_subtype == "alumni" else "pending",
+        )
+        extra = record.get("extra") or {}
+        for k, v in extra.items():
+            if hasattr(profile, k):
+                setattr(profile, k, v)
+        db.add(profile)
+
+    db.commit()
+    db.refresh(user)
+
+    registration_cache.delete_pending(email)
+    log_auth_event(db, "email_verified_via_cache", user_id=user.id, email=user.email)
+    return user
+
+
+# ============================================================================
+# DB-BACKED VERIFICATION (email_change / password_reset_confirm on existing users)
 # ============================================================================
 
 def create_email_verification(db: Session, user: User, purpose: str = "registration") -> str:
+    """Used for email_change and password_reset_confirm on existing users."""
     window_start = datetime.now(timezone.utc) - timedelta(minutes=OTP_RESEND_WINDOW_MINUTES)
     recent = (
         db.query(EmailVerification)
@@ -74,7 +224,10 @@ def create_email_verification(db: Session, user: User, purpose: str = "registrat
     return otp
 
 
-def verify_email_otp(db: Session, email: str, otp: str, purpose: str = "registration") -> User:
+def verify_email_otp(
+    db: Session, email: str, otp: str, purpose: str = "registration",
+) -> User:
+    """DB-backed verification for email_change / password_reset_confirm."""
     user = db.query(User).filter(User.email == email.lower().strip()).first()
     if not user:
         raise VerificationError("No account found with this email.", 404)
@@ -109,19 +262,10 @@ def verify_email_otp(db: Session, email: str, otp: str, purpose: str = "registra
     record.is_used = True
     record.consumed_at = now
     user.email_verified = True
-
-    # Student + alumni: activate. Others: move to pending_approval.
-    if user.user_type == "student" or (user.user_type == "external" and user.external_subtype == "alumni"):
-        if user.account_status == "pending":
-            user.account_status = "active"
-    else:
-        if user.account_status == "pending":
-            user.account_status = "pending_approval"
-
     db.commit()
     db.refresh(user)
 
-    log_auth_event(db, "email_verified", user_id=user.id, email=user.email)
+    log_auth_event(db, f"email_verified_{purpose}", user_id=user.id, email=user.email)
     return user
 
 
@@ -129,8 +273,10 @@ def verify_email_otp(db: Session, email: str, otp: str, purpose: str = "registra
 # PHONE
 # ============================================================================
 
-def create_phone_verification(db: Session, user: User, phone: str | None = None,
-                              purpose: str = "registration") -> str:
+def create_phone_verification(
+    db: Session, user: User, phone: str | None = None,
+    purpose: str = "registration",
+) -> str:
     target = (phone or user.phone or "").strip()
     if not target:
         raise VerificationError("No phone number on file. Provide one to verify.", 400)
@@ -162,7 +308,10 @@ def create_phone_verification(db: Session, user: User, phone: str | None = None,
     db.add(record)
     db.commit()
 
-    send_sms(target, f"Your Smart Comrade verification code is {otp}. Expires in {PHONE_OTP_EXPIRY_MINUTES} min.")
+    send_sms(
+        target,
+        f"Your Smart Comrade verification code is {otp}. Expires in {PHONE_OTP_EXPIRY_MINUTES} min.",
+    )
     return otp
 
 
@@ -209,7 +358,9 @@ def verify_phone_otp(db: Session, user: User, otp: str, purpose: str = "registra
 # PASSWORD RESET
 # ============================================================================
 
-def create_password_reset(db: Session, email: str, request_ip: str | None = None) -> str | None:
+def create_password_reset(
+    db: Session, email: str, request_ip: str | None = None,
+) -> str | None:
     user = db.query(User).filter(User.email == email.lower().strip()).first()
     if not user:
         return None
@@ -226,13 +377,17 @@ def create_password_reset(db: Session, email: str, request_ip: str | None = None
     reset_url = f"https://app.smartcomrade.com/reset?token={token}"
     send_password_reset_email(user.email, reset_url)
 
-    log_auth_event(db, "password_reset_requested", user_id=user.id, email=user.email,
-                   ip_address=request_ip)
+    log_auth_event(
+        db, "password_reset_requested", user_id=user.id, email=user.email,
+        ip_address=request_ip,
+    )
     return token
 
 
-def consume_password_reset(db: Session, token: str, new_password: str,
-                           request_ip: str | None = None) -> User:
+def consume_password_reset(
+    db: Session, token: str, new_password: str,
+    request_ip: str | None = None,
+) -> User:
     th = hash_token(token)
     record = db.query(PasswordReset).filter(PasswordReset.token_hash == th).first()
     if not record:
@@ -259,6 +414,8 @@ def consume_password_reset(db: Session, token: str, new_password: str,
     db.commit()
     db.refresh(user)
 
-    log_auth_event(db, "password_reset_succeeded", user_id=user.id, email=user.email,
-                   ip_address=request_ip)
+    log_auth_event(
+        db, "password_reset_succeeded", user_id=user.id, email=user.email,
+        ip_address=request_ip,
+    )
     return user

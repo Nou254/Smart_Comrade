@@ -1,5 +1,7 @@
 """
 Authentication business logic: registration, login, approval, admin 2FA gate.
+Registration stages data in cache until email verification succeeds.
+
 Supports 13 user types including 5 distinct external subtypes.
 """
 from datetime import datetime, timezone, timedelta
@@ -8,8 +10,10 @@ from sqlalchemy.orm import Session
 from app.core.security import (
     hash_password, verify_password,
     create_2fa_pending_token, create_admin_setup_token,
+    generate_otp, hash_otp,
 )
 from app.core import captcha as captcha_module
+from app.core.notifications import send_otp_email
 from app.models.user import User
 from app.models.academic import Institution
 from app.models.external_profile import ExternalProfile
@@ -18,7 +22,7 @@ from app.schemas.user import (
     InvestorRegister, OrganizationRegister, AlumniRegister,
     MentorRegister, SpecialistRegister, UserLogin,
 )
-from app.services.verification_service import create_email_verification
+from app.services import registration_cache
 from app.services.session_service import create_session
 from app.services.audit_service import log_auth_event
 from app.services.jurisdiction_service import is_admin_user
@@ -61,22 +65,22 @@ class CaptchaRequired(Exception):
 APPROVAL_REQUIRED_TYPES = {"lecturer", "external"}
 AUTO_ACTIVE_EXTERNAL = {"alumni"}
 
-# Which external subtypes need admin approval
 APPROVAL_REQUIRED_SUBTYPES = {
     "investor", "organization", "mentor", "specialist",
 }
-# Alumni don't need approval (email verification only)
 
 LOCK_AFTER_ATTEMPTS = 5
 LOCK_MINUTES = 15
 ADMIN_LOCK_AFTER_ATTEMPTS = 3
 ADMIN_LOCK_MINUTES = 60
 
-USER_SESSION_MINUTES = 1440   # 24 hours
-ADMIN_SESSION_MINUTES = 720   # 12 hours
+USER_SESSION_MINUTES = 1440
+ADMIN_SESSION_MINUTES = 720
 
 CURRENT_TOS_VERSION = "1.0"
 CURRENT_PRIVACY_VERSION = "1.0"
+
+OTP_EXPIRY_MINUTES = 15
 
 
 # ── Helpers ────────────────────────────────────────────────────
@@ -102,105 +106,119 @@ def _require_tos_privacy(tos: bool, privacy: bool) -> None:
         raise AuthError("You must accept the Privacy Policy.", 400)
 
 
-def _record_tos_privacy(
-    user: User,
-    *,
-    tos_version: str | None,
-    privacy_version: str | None,
-) -> None:
-    now = datetime.now(timezone.utc)
-    user.tos_accepted_at = now
-    user.tos_version = tos_version or CURRENT_TOS_VERSION
-    user.privacy_accepted_at = now
-    user.privacy_version = privacy_version or CURRENT_PRIVACY_VERSION
-
-
-def _assign_base_role(db: Session, user: User, role_code: str,
-                      *, status: str = "active") -> None:
-    role = db.query(Role).filter(Role.code == role_code).first()
-    if role:
-        db.add(UserRole(
-            user_id=user.id, role_id=role.id,
-            jurisdiction_type="self", jurisdiction_id=None,
-            status=status, start_date=datetime.now(timezone.utc),
-            notes=f"Auto-assigned on {user.user_type} registration",
-        ))
-        db.commit()
-
-
-def _create_user(
-    db: Session, *,
-    first_name, last_name, email, phone, password,
-    user_type,
-    institution_id=None, external_subtype=None,
-    institutional_email=None, department=None, title=None,
-    domain_verified=False,
-    tos_version=None, privacy_version=None,
-) -> User:
+def _check_uniqueness(db: Session, email: str, phone: str | None) -> None:
+    """Reject if email/phone already taken in DB or pending in cache."""
     if db.query(User).filter(User.email == email.lower().strip()).first():
         raise AuthError("An account with this email already exists.", 409)
     if phone and db.query(User).filter(User.phone == phone).first():
         raise AuthError("An account with this phone number already exists.", 409)
 
-    user = User(
-        first_name=first_name.strip(),
-        last_name=last_name.strip(),
-        email=email.lower().strip(),
-        phone=phone.strip() if phone else None,
+    if registration_cache.get_pending(email):
+        raise AuthError("A registration is already pending for this email.", 409)
+    if phone and registration_cache.is_phone_pending(phone):
+        raise AuthError("A registration is already pending for this phone.", 409)
+
+
+def _stage_registration(
+    db: Session, *,
+    first_name, last_name, email, phone, password,
+    user_type,
+    external_subtype=None,
+    institution_id=None,
+    institutional_email=None,
+    department=None,
+    title=None,
+    domain_verified=False,
+    tos_version=None,
+    privacy_version=None,
+    extra: dict | None = None,
+) -> dict:
+    """
+    Stage a pending registration in cache.
+    Returns a dict suitable for LoginResponse.user.
+    No DB row is created.
+    """
+    _check_uniqueness(db, email, phone)
+
+    otp = generate_otp()
+    otp_hash_val = hash_otp(otp)
+    otp_expires = datetime.now(timezone.utc) + timedelta(minutes=OTP_EXPIRY_MINUTES)
+
+    registration_cache.store_pending(
+        email=email,
+        phone=phone,
+        first_name=first_name,
+        last_name=last_name,
         password_hash=hash_password(password),
         user_type=user_type,
         external_subtype=external_subtype,
         institution_id=institution_id,
-        institutional_email=institutional_email.lower().strip() if institutional_email else None,
+        institutional_email=institutional_email,
         department=department,
         title=title,
         domain_verified=domain_verified,
-        account_status="pending",
-        email_verified=False,
-        phone_verified=False,
+        tos_version=tos_version,
+        privacy_version=privacy_version,
+        otp_hash=otp_hash_val,
+        otp_expires_at=otp_expires,
+        purpose="registration",
+        extra=extra,
     )
-    _record_tos_privacy(user, tos_version=tos_version, privacy_version=privacy_version)
-    db.add(user)
-    db.commit()
-    db.refresh(user)
 
-    # Assign base role
-    base_role_code = {
-        "student": "student",
-        "lecturer": "lecturer",
-        "external": "external_user",
-    }.get(user_type)
-    if base_role_code:
-        role_status = (
-            "pending" if user_type in APPROVAL_REQUIRED_TYPES else "active"
-        )
-        _assign_base_role(db, user, base_role_code, status=role_status)
+    send_otp_email(email, otp, purpose="registration")
 
-    return user
+    log_auth_event(
+        db, "register_staged", email=email.lower().strip(),
+        event_data={"user_type": user_type, "external_subtype": external_subtype},
+    )
+
+    return {
+        "email": email.lower().strip(),
+        "first_name": first_name.strip(),
+        "last_name": last_name.strip(),
+        "user_type": user_type,
+        "external_subtype": external_subtype,
+        "account_status": "pending",
+        "email_verified": False,
+    }
+
+
+def _stage_external(
+    db: Session, *, subtype: str,
+    first_name, last_name, email, phone, password,
+    tos_version, privacy_version,
+    extra: dict | None = None,
+) -> dict:
+    return _stage_registration(
+        db,
+        first_name=first_name, last_name=last_name,
+        email=email, phone=phone, password=password,
+        user_type="external", external_subtype=subtype,
+        tos_version=tos_version, privacy_version=privacy_version,
+        extra=extra,
+    )
 
 
 # ============================================================================
-# REGISTRATION — Core types
+# REGISTRATION — Core types (all return pending dict)
 # ============================================================================
 
-def register_student(db: Session, data: StudentRegister) -> User:
+def register_student(db: Session, data: StudentRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
     inst = db.query(Institution).filter(Institution.id == data.institution_id).first()
     if not inst:
         raise AuthError("Institution not found.", 404)
-    user = _create_user(
+
+    return _stage_registration(
         db,
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
+        email=str(data.email), phone=data.phone, password=data.password,
         user_type="student", institution_id=inst.id,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
     )
-    create_email_verification(db, user, purpose="registration")
-    log_auth_event(db, "register_student", user_id=user.id, email=user.email)
-    return user
 
 
-def register_lecturer(db: Session, data: LecturerRegister) -> User:
+def register_lecturer(db: Session, data: LecturerRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
     inst = db.query(Institution).filter(Institution.id == data.institution_id).first()
     if not inst:
@@ -209,143 +227,100 @@ def register_lecturer(db: Session, data: LecturerRegister) -> User:
     if data.title not in valid_titles:
         raise AuthError(f"Invalid title. Must be one of: {sorted(valid_titles)}")
     domain_ok = _email_domain_matches(str(data.institutional_email), inst)
-    user = _create_user(
+
+    return _stage_registration(
         db,
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
+        email=str(data.email), phone=data.phone, password=data.password,
         user_type="lecturer", institution_id=inst.id,
         institutional_email=str(data.institutional_email),
         department=data.department, title=data.title,
         domain_verified=domain_ok,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
     )
-    create_email_verification(db, user, purpose="registration")
-    log_auth_event(db, "register_lecturer", user_id=user.id, email=user.email,
-                   event_data={"domain_verified": domain_ok})
-    return user
 
 
-def register_external(db: Session, data: ExternalRegister) -> User:
+def register_external(db: Session, data: ExternalRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
     valid_subtypes = {"investor", "mentor", "organization", "alumni", "specialist"}
     if data.external_subtype not in valid_subtypes:
         raise AuthError(f"Invalid subtype. Must be one of: {sorted(valid_subtypes)}")
 
-    user = _create_user(
-        db,
+    return _stage_external(
+        db, subtype=data.external_subtype,
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
-        user_type="external", external_subtype=data.external_subtype,
-        department=data.organization_name, title=data.profession,
+        email=str(data.email), phone=data.phone, password=data.password,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
+        extra={
+            "organization_name": data.organization_name,
+            "mentor_profession": data.profession,
+            "mentor_expertise": data.expertise,
+        },
     )
-
-    # Create minimal external_profile row
-    db.add(ExternalProfile(
-        user_id=user.id,
-        external_subtype=data.external_subtype,
-        organization_name=data.organization_name,
-        mentor_profession=data.profession if data.external_subtype == "mentor" else None,
-        mentor_expertise=data.expertise if data.external_subtype == "mentor" else None,
-        verification_status="pending",
-    ))
-    db.commit()
-
-    create_email_verification(db, user, purpose="registration")
-    log_auth_event(db, "register_external", user_id=user.id, email=user.email,
-                   event_data={"subtype": data.external_subtype})
-    return user
 
 
 # ============================================================================
-# REGISTRATION — External subtypes (5 distinct flows)
+# REGISTRATION — External subtypes
 # ============================================================================
 
-def _finalize_external_registration(db: Session, user: User) -> None:
-    """Assign external_user role + trigger email verification."""
-    create_email_verification(db, user, purpose="registration")
-    log_auth_event(
-        db, f"register_{user.external_subtype}", user_id=user.id, email=user.email,
-    )
-
-
-def register_investor(db: Session, data: InvestorRegister) -> User:
+def register_investor(db: Session, data: InvestorRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
-    user = _create_user(
-        db,
+    return _stage_external(
+        db, subtype="investor",
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
-        user_type="external", external_subtype="investor",
+        email=str(data.email), phone=data.phone, password=data.password,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
+        extra={
+            "investor_org_name": data.organization_name,
+            "investor_role": data.role_in_organization,
+            "investment_focus": data.investment_focus,
+        },
     )
-    db.add(ExternalProfile(
-        user_id=user.id, external_subtype="investor",
-        investor_org_name=data.organization_name,
-        investor_role=data.role_in_organization,
-        investment_focus=data.investment_focus,
-        verification_status="pending",
-    ))
-    db.commit()
-    _finalize_external_registration(db, user)
-    return user
 
 
-def register_organization(db: Session, data: OrganizationRegister) -> User:
+def register_organization(db: Session, data: OrganizationRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
 
-    # Organization name must be unique
+    org_name = data.organization_name.strip()
     if db.query(ExternalProfile).filter(
-        ExternalProfile.organization_name == data.organization_name.strip(),
+        ExternalProfile.organization_name == org_name,
     ).first():
         raise AuthError("An organization with this name already exists.", 409)
 
-    user = _create_user(
-        db,
+    return _stage_external(
+        db, subtype="organization",
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
-        user_type="external", external_subtype="organization",
+        email=str(data.email), phone=data.phone, password=data.password,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
+        extra={
+            "organization_name": org_name,
+            "organization_type": data.organization_type,
+            "industry": data.industry,
+            "registration_number": data.registration_number,
+            "contact_name": data.contact_name,
+            "contact_email": str(data.contact_email) if data.contact_email else None,
+            "contact_phone": data.contact_phone,
+        },
     )
-    db.add(ExternalProfile(
-        user_id=user.id, external_subtype="organization",
-        organization_name=data.organization_name.strip(),
-        organization_type=data.organization_type,
-        industry=data.industry,
-        registration_number=data.registration_number,
-        contact_name=data.contact_name,
-        contact_email=str(data.contact_email) if data.contact_email else None,
-        contact_phone=data.contact_phone,
-        verification_status="pending",
-    ))
-    db.commit()
-    _finalize_external_registration(db, user)
-    return user
 
 
-def register_alumni(db: Session, data: AlumniRegister) -> User:
-    """Alumni do not require admin approval — activated after email verification."""
+def register_alumni(db: Session, data: AlumniRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
-    user = _create_user(
-        db,
+    return _stage_external(
+        db, subtype="alumni",
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
-        user_type="external", external_subtype="alumni",
+        email=str(data.email), phone=data.phone, password=data.password,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
+        extra={
+            "former_institution": data.former_institution,
+            "graduation_year": data.graduation_year,
+            "current_profession": data.current_profession,
+            "alumni_expertise": data.expertise,
+        },
     )
-    db.add(ExternalProfile(
-        user_id=user.id, external_subtype="alumni",
-        former_institution=data.former_institution,
-        graduation_year=data.graduation_year,
-        current_profession=data.current_profession,
-        alumni_expertise=data.expertise,
-        verification_status="approved",  # auto-approved
-    ))
-    db.commit()
-    _finalize_external_registration(db, user)
-    return user
 
 
-def register_mentor(db: Session, data: MentorRegister) -> User:
+def register_mentor(db: Session, data: MentorRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
     if len(data.areas_of_expertise) < 1:
         raise AuthError("At least one area of expertise is required.", 400)
@@ -356,48 +331,36 @@ def register_mentor(db: Session, data: MentorRegister) -> User:
             f"Invalid availability. Must be one of: {sorted(valid_availability)}"
         )
 
-    user = _create_user(
-        db,
+    return _stage_external(
+        db, subtype="mentor",
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
-        user_type="external", external_subtype="mentor",
+        email=str(data.email), phone=data.phone, password=data.password,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
+        extra={
+            "mentor_profession": data.profession,
+            "mentor_expertise": ", ".join(data.areas_of_expertise),
+            "mentor_experience_summary": data.experience_summary,
+            "mentor_availability": data.availability,
+        },
     )
-    db.add(ExternalProfile(
-        user_id=user.id, external_subtype="mentor",
-        mentor_profession=data.profession,
-        mentor_expertise=", ".join(data.areas_of_expertise),
-        mentor_experience_summary=data.experience_summary,
-        mentor_availability=data.availability,
-        verification_status="pending",
-    ))
-    db.commit()
-    _finalize_external_registration(db, user)
-    return user
 
 
-def register_specialist(db: Session, data: SpecialistRegister) -> User:
+def register_specialist(db: Session, data: SpecialistRegister) -> dict:
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
-    user = _create_user(
-        db,
+    return _stage_external(
+        db, subtype="specialist",
         first_name=data.first_name, last_name=data.last_name,
-        email=data.email, phone=data.phone, password=data.password,
-        user_type="external", external_subtype="specialist",
+        email=str(data.email), phone=data.phone, password=data.password,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
+        extra={
+            "expertise_field": data.field_of_expertise,
+            "affiliation": data.affiliated_organization,
+        },
     )
-    db.add(ExternalProfile(
-        user_id=user.id, external_subtype="specialist",
-        expertise_field=data.field_of_expertise,
-        affiliation=data.affiliated_organization,
-        verification_status="pending",
-    ))
-    db.commit()
-    _finalize_external_registration(db, user)
-    return user
 
 
 # ============================================================================
-# LOGIN
+# LOGIN (unchanged behavior; still uses the users table)
 # ============================================================================
 
 def login_user(
@@ -405,14 +368,22 @@ def login_user(
     *,
     ip: str | None = None,
     user_agent: str | None = None,
-    request = None,  # FastAPI Request, optional
+    request=None,
 ) -> tuple[User, str, dict]:
-    """
-    Returns (user, access_token, extras) where extras contains
-    hub/redirect/environment info for the response.
-    """
     user = db.query(User).filter(User.email == data.email.lower().strip()).first()
     if not user:
+        # Check if the email is pending registration
+        pending = registration_cache.get_pending(str(data.email))
+        if pending:
+            log_auth_event(
+                db, "login_pending_registration", email=str(data.email),
+                ip_address=ip, user_agent=user_agent, success=False,
+            )
+            raise AuthError(
+                "Please verify your email to continue. "
+                "Check your inbox for the verification code.",
+                403,
+            )
         log_auth_event(
             db, "login_failed", email=data.email,
             ip_address=ip, user_agent=user_agent, success=False,
@@ -434,7 +405,6 @@ def login_user(
         )
         raise AuthError(f"Account locked. Try again in {remaining} minutes.", 423)
 
-    # --- CAPTCHA gate (checks if CAPTCHA is required after failures) ---
     if captcha_module.captcha_required(user.failed_login_attempts):
         if not data.captcha_token:
             raise CaptchaRequired("CAPTCHA verification required.")
@@ -444,7 +414,6 @@ def login_user(
         except captcha_module.CaptchaError as e:
             raise AuthError(e.message, e.status_code)
 
-    # --- Password check ---
     if not verify_password(data.password, user.password_hash):
         user.failed_login_attempts += 1
         if user.failed_login_attempts >= lock_attempts:
@@ -471,7 +440,6 @@ def login_user(
     user.failed_login_attempts = 0
     user.locked_until = None
 
-    # --- Status checks ---
     if user.account_status == "suspended":
         log_auth_event(
             db, "login_blocked", user_id=user.id, email=user.email,
@@ -490,7 +458,6 @@ def login_user(
 
     db.commit()
 
-    # --- Admin 2FA enforcement ---
     if admin and is_admin_2fa_required(db) and not user.two_factor_enabled:
         setup_token = create_admin_setup_token(user.id)
         log_auth_event(
@@ -500,7 +467,6 @@ def login_user(
         )
         raise Admin2FASetupRequired(setup_token)
 
-    # --- 2FA challenge ---
     if user.two_factor_enabled:
         from app.services.two_factor_service import issue_login_challenge
         issue_login_challenge(db, user, ip=ip, ua=user_agent)
@@ -513,7 +479,6 @@ def login_user(
         )
         raise TwoFactorRequired(temp)
 
-    # --- Create session ---
     expiry = ADMIN_SESSION_MINUTES if admin else USER_SESSION_MINUTES
     token, _ = create_session(
         db, user, ip_address=ip, user_agent=user_agent,
@@ -526,21 +491,17 @@ def login_user(
         event_data={"session_minutes": expiry, "admin": admin},
     )
 
-    # --- Detect new device ---
     is_new_device = security_alert_service.detect_new_device(db, user, user_agent, ip)
     if is_new_device:
         security_alert_service.emit_new_device_alert(db, user, user_agent, ip)
     security_alert_service.remember_device(db, user, user_agent)
 
-    # --- Build extras for response ---
     hub_target = resolve_hub(db, user.id, user.user_type)
-
     extras = {
         "redirect_to": hub_target.redirect_to,
         "hub": hub_target.hub,
     }
 
-    # Environment detection (only if we have the request object)
     if request is not None:
         try:
             env_info = analyze_env(user.user_type, request)
@@ -589,7 +550,6 @@ def approve_user(
             UserRole.user_id == user.id, UserRole.status == "pending",
         ).update({"status": "active"})
 
-        # Update external_profile verification_status
         profile = db.query(ExternalProfile).filter(
             ExternalProfile.user_id == user.id,
         ).first()

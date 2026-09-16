@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
+    # ── Cache (for pending registrations) ────────────────────
+    CACHE_BACKEND: str = "memory"    # memory | redis
+
     # ── Database ──────────────────────────────────────────────
     DATABASE_URL: str
 

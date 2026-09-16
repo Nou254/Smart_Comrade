@@ -1,7 +1,7 @@
 """
 Authentication endpoints.
 Supports 13 user types, CAPTCHA, environment detection, account deactivation,
-and per-endpoint rate limiting.
+pending-registration caching, and rate limiting.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.responses import JSONResponse
@@ -46,10 +46,12 @@ from app.services.auth_service import (
 )
 from app.services.verification_service import (
     VerificationError,
+    verify_pending_registration, resend_registration_otp,
     create_email_verification, verify_email_otp,
     create_phone_verification, verify_phone_otp,
     create_password_reset, consume_password_reset,
 )
+from app.services import registration_cache
 from app.services.session_service import (
     create_session, revoke_session, revoke_all_other_sessions,
     list_sessions, revoke_session_by_id,
@@ -86,24 +88,16 @@ def _user_or_admin_setup(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    """
-    Accepts either:
-      - a normal session JWT (validated against the sessions table), OR
-      - an admin-2FA-setup token
-    """
     if credentials is None:
         raise HTTPException(status_code=401, detail="Missing token.")
-
     token = credentials.credentials
 
-    # 1) Try admin setup token
     uid = decode_admin_setup_token(token)
     if uid:
         user = db.query(User).filter(User.id == uid).first()
         if user:
             return user
 
-    # 2) Fall back to normal session
     payload = decode_access_token(token)
     if not payload or not is_session_valid(db, token):
         raise HTTPException(status_code=401, detail="Invalid or expired token.")
@@ -117,8 +111,12 @@ def _user_or_admin_setup(
 
 
 # ============================================================================
-# REGISTRATION — Core types
+# REGISTRATION — all return pending dict + requires_verification=true
 # ============================================================================
+
+def _pending_response(staged: dict) -> LoginResponse:
+    return LoginResponse(user=staged, requires_verification=True)
+
 
 @router.post(
     "/register/student",
@@ -128,12 +126,12 @@ def _user_or_admin_setup(
 )
 def register_student_endpoint(payload: StudentRegister, db: Session = Depends(get_db)):
     try:
-        user = register_student(db, payload)
+        staged = register_student(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
 
 @router.post(
@@ -144,12 +142,12 @@ def register_student_endpoint(payload: StudentRegister, db: Session = Depends(ge
 )
 def register_lecturer_endpoint(payload: LecturerRegister, db: Session = Depends(get_db)):
     try:
-        user = register_lecturer(db, payload)
+        staged = register_lecturer(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
 
 @router.post(
@@ -160,15 +158,13 @@ def register_lecturer_endpoint(payload: LecturerRegister, db: Session = Depends(
 )
 def register_external_endpoint(payload: ExternalRegister, db: Session = Depends(get_db)):
     try:
-        user = register_external(db, payload)
+        staged = register_external(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
-
-# --- Distinct external subtype endpoints ---
 
 @router.post(
     "/register/investor",
@@ -178,12 +174,12 @@ def register_external_endpoint(payload: ExternalRegister, db: Session = Depends(
 )
 def register_investor_endpoint(payload: InvestorRegister, db: Session = Depends(get_db)):
     try:
-        user = register_investor(db, payload)
+        staged = register_investor(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
 
 @router.post(
@@ -194,12 +190,12 @@ def register_investor_endpoint(payload: InvestorRegister, db: Session = Depends(
 )
 def register_organization_endpoint(payload: OrganizationRegister, db: Session = Depends(get_db)):
     try:
-        user = register_organization(db, payload)
+        staged = register_organization(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
 
 @router.post(
@@ -210,12 +206,12 @@ def register_organization_endpoint(payload: OrganizationRegister, db: Session = 
 )
 def register_alumni_endpoint(payload: AlumniRegister, db: Session = Depends(get_db)):
     try:
-        user = register_alumni(db, payload)
+        staged = register_alumni(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
 
 @router.post(
@@ -226,12 +222,12 @@ def register_alumni_endpoint(payload: AlumniRegister, db: Session = Depends(get_
 )
 def register_mentor_endpoint(payload: MentorRegister, db: Session = Depends(get_db)):
     try:
-        user = register_mentor(db, payload)
+        staged = register_mentor(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
 
 @router.post(
@@ -242,12 +238,12 @@ def register_mentor_endpoint(payload: MentorRegister, db: Session = Depends(get_
 )
 def register_specialist_endpoint(payload: SpecialistRegister, db: Session = Depends(get_db)):
     try:
-        user = register_specialist(db, payload)
+        staged = register_specialist(db, payload)
     except AuthError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
     except VerificationError as e:
         raise HTTPException(status_code=e.status_code, detail=e.message)
-    return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+    return _pending_response(staged)
 
 
 # ============================================================================
@@ -302,7 +298,7 @@ def me(current_user: User = Depends(get_current_user)):
 
 
 # ============================================================================
-# EMAIL VERIFICATION
+# EMAIL VERIFICATION (routes by purpose)
 # ============================================================================
 
 @router.post(
@@ -311,6 +307,15 @@ def me(current_user: User = Depends(get_current_user)):
     dependencies=[Depends(rate_limit("auth.otp.verify.email"))],
 )
 def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
+    if payload.purpose == "registration":
+        # Cache-based promotion to users table
+        try:
+            user = verify_pending_registration(db, str(payload.email), payload.otp)
+        except VerificationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message)
+        return LoginResponse(user=UserResponse.model_validate(user).model_dump())
+
+    # DB-based for email_change / password_reset_confirm
     try:
         user = verify_email_otp(db, str(payload.email), payload.otp, payload.purpose)
     except VerificationError as e:
@@ -324,6 +329,17 @@ def verify_email(payload: VerifyEmailRequest, db: Session = Depends(get_db)):
     dependencies=[Depends(rate_limit("auth.otp.resend.email"))],
 )
 def resend_otp(payload: ResendOtpRequest, db: Session = Depends(get_db)):
+    # Registration path — check cache first
+    if payload.purpose == "registration" and registration_cache.get_pending(str(payload.email)):
+        try:
+            resend_registration_otp(str(payload.email))
+        except VerificationError as e:
+            raise HTTPException(status_code=e.status_code, detail=e.message)
+        return OtpSentResponse(
+            message="OTP sent", email=str(payload.email), expires_in_minutes=15,
+        )
+
+    # DB path (email_change / password_reset_confirm on existing users)
     user = db.query(User).filter(User.email == str(payload.email).lower().strip()).first()
     if not user:
         raise HTTPException(status_code=404, detail="No account found with this email.")
@@ -617,7 +633,7 @@ def two_factor_status(
 
 
 # ============================================================================
-# STEP-UP AUTHENTICATION
+# STEP-UP
 # ============================================================================
 
 @router.post("/step-up", response_model=StepUpResponse)
@@ -677,7 +693,7 @@ def accept_admin_invitation(
 
 
 # ============================================================================
-# APPROVAL WORKFLOW (admins)
+# APPROVAL WORKFLOW
 # ============================================================================
 
 @router.get("/pending-approvals", response_model=list[PendingApprovalResponse])
