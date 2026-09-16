@@ -18,8 +18,8 @@ class UploadResponse(BaseModel):
     uploaded_by: str | None
     status: str
     error_message: str | None = None
-    scan_started_at: str | None = None
-    scan_completed_at: str | None = None
+    scan_started_at: datetime | None = None
+    scan_completed_at: datetime | None = None
     created_at: datetime
 
 

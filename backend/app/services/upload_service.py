@@ -8,15 +8,12 @@ import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import BinaryIO
 
-from fastapi import UploadFile as FastAPIFile
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.models.group import Group
 from app.models.upload import TimetableUpload, UploadFile
-from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -32,11 +29,15 @@ ALLOWED_EXTENSIONS = {"pdf", "png", "jpg", "jpeg", "docx", "doc", "pptx", "ppt"}
 
 # Optional integrations — degrade gracefully if not installed
 try:
-    import fitz  # pymupdf
+    import pymupdf
     _HAS_PYMUPDF = True
 except Exception:
-    _HAS_PYMUPDF = False
-    logger.warning("pymupdf not installed — PDF page rendering disabled")
+    try:
+        import fitz as pymupdf  # fallback for old pymupdf
+        _HAS_PYMUPDF = True
+    except Exception:
+        _HAS_PYMUPDF = False
+        logger.warning("pymupdf not installed — PDF page rendering disabled")
 
 try:
     import boto3
@@ -107,7 +108,7 @@ def _save_s3(upload_id: str, file_id: str, ext: str, content: bytes) -> str | No
 def _detect_page_count(local_path: str, ext: str) -> int:
     if ext == "pdf" and _HAS_PYMUPDF:
         try:
-            with fitz.open(local_path) as doc:
+            with pymupdf.open(local_path) as doc:
                 return doc.page_count
         except Exception as e:
             logger.warning(f"Could not read PDF page count: {e}")
@@ -115,7 +116,6 @@ def _detect_page_count(local_path: str, ext: str) -> int:
     if ext in ("png", "jpg", "jpeg"):
         return 1
     if ext in ("docx", "doc", "pptx", "ppt"):
-        # without additional libs, we don't know — treat as 1
         return 1
     return 1
 
@@ -183,7 +183,6 @@ def add_file(
     page_count = _detect_page_count(local_path, ext)
 
     if page_count > settings.MAX_PAGES_PER_FILE:
-        # clean up
         try:
             os.remove(local_path)
         except OSError:
@@ -229,13 +228,12 @@ def render_page_preview(file: UploadFile, page_number: int) -> bytes:
     if ext == "pdf":
         if not _HAS_PYMUPDF:
             raise UploadError("PDF preview requires pymupdf.", 500)
-        with fitz.open(file.file_url) as doc:
+        with pymupdf.open(file.file_url) as doc:
             page = doc.load_page(page_number - 1)
-            pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))  # 2x zoom
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2))
             return pix.tobytes("png")
 
     if ext in ("png", "jpg", "jpeg"):
-        # already an image, return as-is
         with open(file.file_url, "rb") as fh:
             return fh.read()
 
@@ -247,7 +245,6 @@ def delete_upload(db: Session, upload_id: str, user_id: str) -> None:
     if upload.uploaded_by and upload.uploaded_by != user_id:
         raise UploadError("Only the uploader can cancel this upload.", 403)
 
-    # Delete local files
     dir_path = _upload_dir(upload_id)
     if dir_path.exists():
         shutil.rmtree(dir_path, ignore_errors=True)
@@ -269,11 +266,11 @@ def update_upload_status(
     upload.status = status
     if error_message is not None:
         upload.error_message = error_message
-    now_iso = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(timezone.utc)
     if scan_started:
-        upload.scan_started_at = now_iso
+        upload.scan_started_at = now
     if scan_completed:
-        upload.scan_completed_at = now_iso
+        upload.scan_completed_at = now
     db.commit()
     db.refresh(upload)
     return upload

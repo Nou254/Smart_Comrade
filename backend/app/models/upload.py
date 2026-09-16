@@ -1,9 +1,13 @@
 """
 Upload pipeline models — Phase 1.
 """
+from datetime import datetime
+
 from sqlalchemy import (
-    BigInteger, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint,
+    BigInteger, DateTime, Float, ForeignKey, Index, Integer,
+    String, Text, UniqueConstraint,
 )
+from sqlalchemy import func as _func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin, UUIDMixin
@@ -30,10 +34,12 @@ class TimetableUpload(Base, UUIDMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="created")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    scan_started_at: Mapped[str | None] = mapped_column(
-        String(40), nullable=True,  # stored as ISO string
+    scan_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
     )
-    scan_completed_at: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    scan_completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     files: Mapped[list["UploadFile"]] = relationship(
         "UploadFile", back_populates="upload", cascade="all, delete-orphan",
@@ -97,10 +103,8 @@ class UploadScannedPage(Base, UUIDMixin):
     raw_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     ocr_confidence_avg: Mapped[float | None] = mapped_column(Float, nullable=True)
 
-    from sqlalchemy import DateTime as _DT
-    from sqlalchemy import func as _func
-    scanned_at: Mapped[object] = mapped_column(
-        _DT(timezone=True), nullable=False, server_default=_func.now(),
+    scanned_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_func.now(),
     )
 
     file: Mapped["UploadFile"] = relationship(
@@ -145,10 +149,8 @@ class ExtractedUnit(Base, UUIDMixin):
         "TimetableUpload", back_populates="extracted_units",
     )
 
-    from sqlalchemy import DateTime as _DT2
-    from sqlalchemy import func as _func2
-    created_at: Mapped[object] = mapped_column(
-        _DT2(timezone=True), nullable=False, server_default=_func2.now(),
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=_func.now(),
     )
 
     def __repr__(self) -> str:

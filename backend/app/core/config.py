@@ -48,6 +48,8 @@ class Settings(BaseSettings):
 
 	# ── OCR ─────────────────────────────────────────────────────
     OCR_PROVIDER: str = "auto"              # "auto" | "ai" | "tesseract"
+    GROQ_API_KEY:str | None = None
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
     OPENAI_API_KEY: str | None = None
     OPENAI_MODEL: str = "gpt-4o"
     TESSERACT_CMD: str | None = None        # e.g. "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"

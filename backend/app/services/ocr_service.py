@@ -10,9 +10,6 @@ The structured extraction (into code/title/time) happens in extraction_service.
 """
 import io
 import logging
-import re
-from dataclasses import dataclass
-from typing import Any
 
 from app.core.config import settings
 
@@ -20,10 +17,15 @@ logger = logging.getLogger(__name__)
 
 # ── Optional dependencies ──────────────────────────────────────
 try:
-    import fitz  # pymupdf
+    import pymupdf
     _HAS_PYMUPDF = True
 except Exception:
-    _HAS_PYMUPDF = False
+    try:
+        import fitz as pymupdf
+        _HAS_PYMUPDF = True
+    except Exception:
+        _HAS_PYMUPDF = False
+        logger.warning("pymupdf not installed — PDF parsing disabled")
 
 try:
     import pytesseract
@@ -36,12 +38,23 @@ except Exception:
     logger.warning("pytesseract or Pillow not installed — OCR will be limited")
 
 
-@dataclass
+# ── Data type ──────────────────────────────────────────────────
+
 class PageOCRResult:
-    page_number: int
-    raw_text: str
-    confidence: float | None  # 0..1
-    method: str               # "text_layer" | "tesseract" | "ai" | "failed"
+    __slots__ = ("page_number", "raw_text", "confidence", "method")
+
+    def __init__(self, page_number: int, raw_text: str,
+                 confidence: float | None, method: str):
+        self.page_number = page_number
+        self.raw_text = raw_text
+        self.confidence = confidence
+        self.method = method
+
+    def __repr__(self) -> str:
+        return (
+            f"<PageOCRResult page={self.page_number} "
+            f"method={self.method} conf={self.confidence}>"
+        )
 
 
 class OCRError(Exception):
@@ -57,10 +70,9 @@ def _extract_pdf_text_layer(file_path: str, page_number: int) -> str | None:
     if not _HAS_PYMUPDF:
         return None
     try:
-        with fitz.open(file_path) as doc:
+        with pymupdf.open(file_path) as doc:
             page = doc.load_page(page_number - 1)
             text = page.get_text("text")
-            # Heuristic: if the page has meaningful text, use it
             if text and len(text.strip()) >= 50:
                 return text
             return None
@@ -71,13 +83,14 @@ def _extract_pdf_text_layer(file_path: str, page_number: int) -> str | None:
 
 # ── Tesseract OCR on a rendered page image ─────────────────────
 
-def _render_pdf_page_png(file_path: str, page_number: int, zoom: float = 2.0) -> bytes | None:
+def _render_pdf_page_png(file_path: str, page_number: int,
+                         zoom: float = 2.0) -> bytes | None:
     if not _HAS_PYMUPDF:
         return None
     try:
-        with fitz.open(file_path) as doc:
+        with pymupdf.open(file_path) as doc:
             page = doc.load_page(page_number - 1)
-            pix = page.get_pixmap(matrix=fitz.Matrix(zoom, zoom))
+            pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
             return pix.tobytes("png")
     except Exception as e:
         logger.warning(f"PDF page render failed: {e}")
@@ -89,14 +102,15 @@ def _tesseract_ocr(image_bytes: bytes) -> tuple[str, float | None]:
         raise OCRError("Tesseract is not installed on the server.", 500)
     try:
         img = Image.open(io.BytesIO(image_bytes))
-        # Get text + confidence
         data = pytesseract.image_to_data(
             img, output_type=pytesseract.Output.DICT, config="--psm 6",
         )
         text = pytesseract.image_to_string(img, config="--psm 6")
 
-        # Compute average confidence on non-empty tokens
-        confs = [int(c) for c in data.get("conf", []) if str(c).lstrip("-").isdigit()]
+        confs = [
+            int(c) for c in data.get("conf", [])
+            if str(c).lstrip("-").isdigit()
+        ]
         confs = [c for c in confs if c >= 0]
         avg_conf = (sum(confs) / len(confs) / 100.0) if confs else None
 
@@ -121,7 +135,6 @@ def scan_page(file_path: str, extension: str, page_number: int) -> PageOCRResult
     ext = extension.lower()
 
     if ext == "pdf":
-        # Try text layer first
         text = _extract_pdf_text_layer(file_path, page_number)
         if text:
             return PageOCRResult(
@@ -130,7 +143,6 @@ def scan_page(file_path: str, extension: str, page_number: int) -> PageOCRResult
                 confidence=0.99,
                 method="text_layer",
             )
-        # Fall back to OCR
         png = _render_pdf_page_png(file_path, page_number)
         if not png:
             return PageOCRResult(
@@ -158,7 +170,6 @@ def scan_page(file_path: str, extension: str, page_number: int) -> PageOCRResult
             method="tesseract",
         )
 
-    # docx/doc/pptx/ppt — not yet supported at the OCR layer
     return PageOCRResult(
         page_number=page_number,
         raw_text="",
