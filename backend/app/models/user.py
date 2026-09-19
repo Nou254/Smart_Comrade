@@ -29,13 +29,32 @@ class User(Base, UUIDMixin, TimestampMixin):
     # --- Authentication ---
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
 
-    # --- User Type (self-selected at registration) ---
-    # student | lecturer | external
+    # --- User Type ---
+    # student        — ordinary student (self-registered)
+    # lecturer       — academic staff (institutional email verified)
+    # external       — generic external participant
+    # admin          — N.O.U.-appointed platform admin
+    #                  (super_admin, regional_admin)
+    # representative — elected student representative
+    #                  (group / school / institution / county)
+    #
+    # user_type is a coarse classifier for UI and policy tiers.
+    # Authority comes from the user's roles, not from user_type.
     user_type: Mapped[str] = mapped_column(
         String(20), default="student", nullable=False, index=True
     )
     # For external users: investor | mentor | organization | alumni | specialist
     external_subtype: Mapped[str | None] = mapped_column(String(30), nullable=True)
+
+    # --- Bootstrap Admin ---
+    # True if this account was elevated to Super Admin via the
+    # BOOTSTRAP_ADMIN_EMAILS allowlist at email-verification time.
+    # Sticky: once true, the account will not auto-elevate again, even
+    # if the role is later revoked. Used to prevent re-elevation of a
+    # previously-removed admin via re-registration.
+    is_bootstrap_admin: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
 
     # --- Account Status ---
     # pending | pending_approval | active | suspended | deactivated | rejected

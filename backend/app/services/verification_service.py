@@ -2,8 +2,13 @@
 Email + phone verification and password reset services.
 
 Two flows:
-  1. Registration   → data lives in cache, promoted to `users` on verify
-  2. Other purposes → existing users, DB-backed verification
+  1. Registration   -> data lives in cache, promoted to `users` on verify
+  2. Other purposes -> existing users, DB-backed verification
+
+Bootstrap admin elevation:
+  Emails listed in BOOTSTRAP_ADMIN_EMAILS are elevated to Super Admin
+  automatically when they complete email verification during normal
+  registration. The elevation is one-time (sticky flag).
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -44,7 +49,64 @@ class VerificationError(Exception):
 
 
 # ============================================================================
-# REGISTRATION — cache-based
+# Bootstrap admin elevation
+# ============================================================================
+
+def _try_bootstrap_admin_elevation(db: Session, user: User) -> bool:
+    """
+    If the user's email is in the bootstrap allowlist and they haven't
+    already been elevated, grant Super Admin and return True.
+    Otherwise return False.
+    """
+    allowlist = settings.bootstrap_admin_email_list
+    if not allowlist:
+        return False
+
+    email = (user.email or "").lower().strip()
+    if email not in allowlist:
+        return False
+
+    if user.is_bootstrap_admin:
+        # Already elevated. Nothing to do.
+        return False
+
+    super_role = db.query(Role).filter(Role.code == "super_admin").first()
+    if not super_role:
+        logger.warning(
+            "Bootstrap admin elevation skipped for %s: super_admin role missing.",
+            email,
+        )
+        return False
+
+    now = datetime.now(timezone.utc)
+    user.user_type = "admin"
+    user.is_bootstrap_admin = True
+
+    # Grant the Super Admin role at platform scope, active immediately.
+    db.add(UserRole(
+        user_id=user.id,
+        role_id=super_role.id,
+        jurisdiction_type="platform",
+        jurisdiction_id=None,
+        status="active",
+        start_date=now,
+        granted_at=now,
+        notes="Bootstrap admin elevation via BOOTSTRAP_ADMIN_EMAILS allowlist",
+    ))
+
+    log_auth_event(
+        db,
+        "bootstrap_admin_elevated",
+        user_id=user.id,
+        email=user.email,
+        event_data={"source": "allowlist", "role": "super_admin"},
+    )
+    logger.info("Bootstrap admin elevated: %s", email)
+    return True
+
+
+# ============================================================================
+# REGISTRATION - cache-based
 # ============================================================================
 
 def resend_registration_otp(email: str) -> None:
@@ -82,7 +144,7 @@ def verify_pending_registration(db: Session, email: str, otp: str) -> User:
     if not record:
         raise VerificationError(
             "No pending registration found for this email. "
-            "It may have expired — please register again.",
+            "It may have expired - please register again.",
             404,
         )
 
@@ -146,26 +208,33 @@ def verify_pending_registration(db: Session, email: str, otp: str) -> User:
     db.add(user)
     db.flush()
 
-    # Base role assignment
-    role_code_map = {
-        "student": "student",
-        "lecturer": "lecturer",
-        "external": "external_user",
-    }
-    base_role_code = role_code_map.get(user.user_type)
-    if base_role_code:
-        role = db.query(Role).filter(Role.code == base_role_code).first()
-        if role:
-            role_status = "active" if is_auto_active else "pending"
-            db.add(UserRole(
-                user_id=user.id, role_id=role.id,
-                jurisdiction_type="self", jurisdiction_id=None,
-                status=role_status,
-                start_date=datetime.now(timezone.utc),
-                notes=f"Auto-assigned on {user.user_type} registration",
-            ))
+    # ── Bootstrap admin elevation ────────────────────────────────
+    # If the email is in the allowlist and not yet claimed, elevate to
+    # Super Admin. This bypasses the normal "student" role assignment
+    # below because the user is now an admin, not a student.
+    is_bootstrap_elevated = _try_bootstrap_admin_elevation(db, user)
 
-    # External profile
+    # ── Base role assignment (skipped for bootstrap admins) ──────
+    if not is_bootstrap_elevated:
+        role_code_map = {
+            "student": "student",
+            "lecturer": "lecturer",
+            "external": "external_user",
+        }
+        base_role_code = role_code_map.get(user.user_type)
+        if base_role_code:
+            role = db.query(Role).filter(Role.code == base_role_code).first()
+            if role:
+                role_status = "active" if is_auto_active else "pending"
+                db.add(UserRole(
+                    user_id=user.id, role_id=role.id,
+                    jurisdiction_type="self", jurisdiction_id=None,
+                    status=role_status,
+                    start_date=datetime.now(timezone.utc),
+                    notes=f"Auto-assigned on {user.user_type} registration",
+                ))
+
+    # ── External profile (only for external users) ───────────────
     if user.user_type == "external" and external_subtype:
         profile = ExternalProfile(
             user_id=user.id,

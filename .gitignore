@@ -181,6 +181,13 @@ tmp/
 temp/
 *.tmp
 
+# Project dumps & scratch scripts
+project_dump.txt
+file_listing.txt
+smart_comrade_full_dump.txt
+dump_files.py
+backup_*.sql
+
 # Postman / API clients
 .postman/
 *.postman_collection.json
@@ -188,6 +195,25 @@ temp/
 
 # Jupyter (in case you ever use it)
 .ipynb_checkpoints/
+
+# ─────────────────────────────────────────────────────────────
+# Node / Frontend (PWA — future)
+# ─────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.next/
+.nuxt/
+dist/
+build/
+
+
+!app/templates/**/*.pdf
+!app/static/**/*.pdf
+!app/templates/**/*.docx
+!app/static/**/*.docx
 
 # ─────────────────────────────────────────────────────────────
 # Tesseract / OCR temp files

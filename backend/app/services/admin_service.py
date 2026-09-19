@@ -19,6 +19,9 @@ from app.models.auth_extension import (
 from app.models.two_factor import TwoFactorChallenge
 from app.services.admin_audit_service import log_admin_action
 from app.services.session_service import revoke_all_other_sessions
+from app.services.jurisdiction_service import (
+    APPOINTED_ADMIN_ROLES, ELECTED_REPRESENTATIVE_ROLES,
+)
 
 
 class AdminError(Exception):
@@ -30,6 +33,27 @@ class AdminError(Exception):
 
 INVITATION_EXPIRY_DAYS = 7
 DELETION_RETENTION_DAYS = 30  # soft-delete window
+
+
+# ============================================================================
+# Role-category helpers
+# ============================================================================
+
+def _user_type_for_role(role_code: str) -> str:
+    """
+    Map a role code to the appropriate user_type value.
+      - N.O.U.-appointed admin   → "admin"
+      - elected representative   → "representative"
+      - academic staff           → "lecturer"
+      - everything else          → "external"
+    """
+    if role_code in APPOINTED_ADMIN_ROLES:
+        return "admin"
+    if role_code in ELECTED_REPRESENTATIVE_ROLES:
+        return "representative"
+    if role_code == "lecturer":
+        return "lecturer"
+    return "external"
 
 
 # ============================================================================
@@ -119,13 +143,16 @@ def accept_invitation(
     if not role:
         raise AdminError("Invitation role no longer exists.", 404)
 
+    # FIX: derive user_type from the invited role's category.
+    user_type = _user_type_for_role(inv.role_code)
+
     user = User(
         first_name=first_name.strip(),
         last_name=last_name.strip(),
         email=inv.email,
         phone=phone.strip() if phone else None,
         password_hash=hash_password(password),
-        user_type="lecturer",
+        user_type=user_type,
         account_status="active",
         email_verified=True,
         phone_verified=False,
@@ -154,7 +181,7 @@ def accept_invitation(
     log_admin_action(
         db, actor_id=inv.invited_by, action="invitation.accept",
         target_type="user", target_id=user.id,
-        new_value=f"User accepted invitation for {inv.role_code}",
+        new_value=f"User accepted invitation for {inv.role_code} (user_type={user_type})",
     )
     return user
 

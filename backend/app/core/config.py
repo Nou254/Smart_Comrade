@@ -2,7 +2,9 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    # ── App ───────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # App
+    # ─────────────────────────────────────────────────────────────────
     APP_NAME: str = "Smart Comrade"
     ENVIRONMENT: str = "development"
     DEBUG: bool = True
@@ -10,23 +12,33 @@ class Settings(BaseSettings):
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
-    # ── Cache (for pending registrations) ────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Cache (for pending registrations)
+    # ─────────────────────────────────────────────────────────────────
     CACHE_BACKEND: str = "memory"    # memory | redis
 
-    # ── Database ──────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Database
+    # ─────────────────────────────────────────────────────────────────
     DATABASE_URL: str
 
-    # ── Redis / Celery ────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Redis / Celery
+    # ─────────────────────────────────────────────────────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
 
-    # ── Object Storage ────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Object Storage
+    # ─────────────────────────────────────────────────────────────────
     S3_ENDPOINT: str = "http://localhost:9000"
     S3_ACCESS_KEY: str = "minioadmin"
     S3_SECRET_KEY: str = "minioadmin"
     S3_BUCKET: str = "smartcomrade"
 
-    # ── Email providers ───────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Email providers
+    # ─────────────────────────────────────────────────────────────────
     EMAIL_PROVIDER: str = "console"       # console | smtp | sendgrid | mailgun | ses
     SMTP_HOST: str | None = None
     SMTP_PORT: int = 587
@@ -39,7 +51,9 @@ class Settings(BaseSettings):
     MAILGUN_API_KEY: str | None = None
     MAILGUN_DOMAIN: str | None = None
 
-    # ── SMS providers ─────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # SMS providers
+    # ─────────────────────────────────────────────────────────────────
     SMS_PROVIDER: str = "console"         # console | africastalking | twilio | vonage
     AT_API_KEY: str | None = None
     AT_USERNAME: str | None = None
@@ -50,32 +64,42 @@ class Settings(BaseSettings):
     VONAGE_API_SECRET: str | None = None
     VONAGE_SENDER_ID: str | None = None
 
-    # ── Rate limiting ─────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Rate limiting
+    # ─────────────────────────────────────────────────────────────────
     RATE_LIMIT_ENABLED: bool = True
     RATE_LIMIT_BACKEND: str = "memory"    # memory | redis
     TRUST_PROXY_HEADERS: bool = False
 
-    # ── CAPTCHA ───────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # CAPTCHA
+    # ─────────────────────────────────────────────────────────────────
     CAPTCHA_PROVIDER: str = "none"        # none | hcaptcha | recaptcha | turnstile
     HCAPTCHA_SECRET_KEY: str | None = None
     RECAPTCHA_SECRET_KEY: str | None = None
     RECAPTCHA_MIN_SCORE: float = 0.5
     TURNSTILE_SECRET_KEY: str | None = None
 
-    # ── Upload pipeline ───────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Upload pipeline
+    # ─────────────────────────────────────────────────────────────────
     UPLOAD_DIR: str = "./uploads"
     MAX_UPLOAD_SIZE_MB: int = 50
     MAX_PAGES_PER_FILE: int = 100
     ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,png,jpg,jpeg,docx,doc,pptx,ppt"
 
-    # ── Storage ───────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Storage
+    # ─────────────────────────────────────────────────────────────────
     STORAGE_BACKEND: str = "local"          # "local" | "s3" | "both"
     S3_BUCKET_NAME: str | None = None
     S3_REGION: str | None = None
     AWS_ACCESS_KEY_ID: str | None = None
     AWS_SECRET_ACCESS_KEY: str | None = None
 
-    # ── OCR / LLM extraction ──────────────────────────────────
+    # ─────────────────────────────────────────────────────────────────
+    # OCR / LLM extraction
+    # ─────────────────────────────────────────────────────────────────
     OCR_PROVIDER: str = "auto"              # "auto" | "ai" | "groq" | "tesseract"
     GROQ_API_KEY: str | None = None
     GROQ_MODEL: str = "openai/gpt-oss-120b"
@@ -83,7 +107,29 @@ class Settings(BaseSettings):
     OPENAI_MODEL: str = "gpt-4o-mini"
     TESSERACT_CMD: str | None = None        # e.g. "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 
-    # ── Legacy toggles (kept for backward compat) ─────────────
+    # ─────────────────────────────────────────────────────────────────
+    # Bootstrap admins
+    # ─────────────────────────────────────────────────────────────────
+    # Comma-separated list of emails. When a user with one of these
+    # emails completes normal registration (verify-email), the system
+    # automatically elevates them to Super Admin, provided they have
+    # not been elevated before. Once elevated, the flag is sticky.
+    BOOTSTRAP_ADMIN_EMAILS: str = ""
+
+    @property
+    def bootstrap_admin_email_list(self) -> list[str]:
+        """Return the allowlist as a lowercase-stripped list."""
+        if not self.BOOTSTRAP_ADMIN_EMAILS:
+            return []
+        return [
+            e.strip().lower()
+            for e in self.BOOTSTRAP_ADMIN_EMAILS.split(",")
+            if e.strip()
+        ]
+
+    # ─────────────────────────────────────────────────────────────────
+    # Legacy toggles (kept for backward compat)
+    # ─────────────────────────────────────────────────────────────────
     SMS_ENABLED: bool = False
 
     class Config:
