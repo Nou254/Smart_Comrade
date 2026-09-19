@@ -1,5 +1,9 @@
 """
 Admin-only endpoints: invitations, suspension, config, emergency mode, audit.
+
+Sensitive actions require a fresh X-Step-Up-Token (password + 2FA), valid for
+10 minutes and scoped to the specific action. Signing in does not grant
+unlimited access to critical operations.
 """
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -17,7 +21,7 @@ from app.schemas.admin import (
     AcceptInvitationRequest,
     SuspendRequest, ReactivateRequest,
     ConfigUpdateRequest, ConfigEntry,
-    AdminActionResponse,UserDeletionRequest, 
+    AdminActionResponse,UserDeletionRequest,
 )
 from app.services.admin_service import (
     AdminError, create_invitation, accept_invitation,
@@ -29,7 +33,7 @@ from app.services.system_config_service import (
 from app.services.admin_audit_service import log_admin_action
 
 
-router = APIRouter(prefix="/admin", tags=["Admin — Platform Management"])
+router = APIRouter(prefix="/admin", tags=["Admin - Platform Management"])
 
 
 def _ip(request: Request) -> str | None:
@@ -41,7 +45,7 @@ def _ua(request: Request) -> str | None:
 
 
 # ============================================================================
-# Invitations (Super Admin only)
+# Invitations (Super Admin only) - step-up scope: admin.invite
 # ============================================================================
 
 @router.post("/invitations", response_model=InvitationResponse, status_code=201)
@@ -49,6 +53,7 @@ def create_admin_invitation(
     payload: InvitationCreate,
     request: Request,
     current_user: User = Depends(require_super_admin),
+    _step_up: User = Depends(require_step_up("admin.invite")),
     db: Session = Depends(get_db),
 ):
     try:
@@ -71,8 +76,7 @@ def create_admin_invitation(
         html_body=f"""
         <html><body style="font-family:Arial,sans-serif;">
           <div style="max-width:480px;margin:0 auto;padding:24px;">
-            <h2 style="color:#00d4c8;">Smart Comrade Admin Invitation</h2>
-            <p>You've been invited as <strong>{inv.role_code}</strong>.</p>
+            <h2 style="color:#00d4c8;">Smart Comrade Admin Invitation</h2>            <p>You've been invited as <strong>{inv.role_code}</strong>.</p>
             <p><a href="{activation_url}" style="background:#00d4c8;color:#fff;padding:12px 24px;
               text-decoration:none;border-radius:6px;font-weight:600;">Activate account</a></p>
             <p style="color:#6b7280;font-size:13px;">This link expires in 7 days.</p>
@@ -108,7 +112,9 @@ def list_invitations(
 
 
 # ============================================================================
-# Suspend / reactivate (any admin with user.suspend / user.reactivate)
+# Suspend / reactivate
+# - permission gate: user.suspend / user.reactivate
+# - step-up scope:    user.suspend / user.reactivate
 # ============================================================================
 
 @router.post("/users/{resource_id}/suspend", response_model=UserResponse)
@@ -117,6 +123,7 @@ def admin_suspend_user(
     payload: SuspendRequest,
     request: Request,
     current_user: User = Depends(require_permission("user.suspend")),
+    _step_up: User = Depends(require_step_up("user.suspend")),
     db: Session = Depends(get_db),
 ):
     try:
@@ -134,6 +141,7 @@ def admin_reactivate_user(
     payload: ReactivateRequest,
     request: Request,
     current_user: User = Depends(require_permission("user.reactivate")),
+    _step_up: User = Depends(require_step_up("user.reactivate")),
     db: Session = Depends(get_db),
 ):
     try:
@@ -147,6 +155,8 @@ def admin_reactivate_user(
 
 # ============================================================================
 # System config / feature flags / emergency mode
+# - read:    super_admin, no step-up
+# - write:   super_admin + step-up scope: system.config
 # ============================================================================
 
 @router.get("/config", response_model=list[ConfigEntry])
@@ -172,21 +182,9 @@ def admin_set_config(
     payload: ConfigUpdateRequest,
     request: Request,
     current_user: User = Depends(require_super_admin),
+    _step_up: User = Depends(require_step_up("system.config")),
     db: Session = Depends(get_db),
 ):
-    # Config writes require a fresh step-up auth
-    # Applied at the endpoint level because we need both the body and the header
-    from app.core.security import decode_step_up_token
-    step_token = request.headers.get("x-step-up-token")
-    if not step_token:
-        raise HTTPException(401, "Step-up authentication required for config changes.",
-                            headers={"X-Step-Up-Required": "true", "X-Step-Up-Scope": "system.config"})
-    payload_data = decode_step_up_token(step_token)
-    if not payload_data or payload_data.get("sub") != current_user.id:
-        raise HTTPException(401, "Invalid step-up token.")
-    if payload_data.get("scope") not in ("system.config", "*"):
-        raise HTTPException(403, "Step-up token not valid for scope 'system.config'.")
-
     try:
         old = get_config(db, key)
         new = set_config(db, key, payload.value, updated_by=current_user.id)
@@ -201,8 +199,9 @@ def admin_set_config(
     )
     return ConfigEntry(key=key, value=new)
 
+
 # ============================================================================
-# User deletion (Super Admin only)
+# User deletion (Super Admin only) - step-up scope: user.delete
 # ============================================================================
 
 @router.delete("/users/{resource_id}", response_model=dict)
@@ -211,6 +210,7 @@ def admin_delete_user(
     payload: UserDeletionRequest,
     request: Request,
     current_user: User = Depends(require_super_admin),
+    _step_up: User = Depends(require_step_up("user.delete")),
     db: Session = Depends(get_db),
 ):
     from app.services.admin_service import AdminError as AdminSvcError, delete_user
@@ -232,14 +232,16 @@ def admin_delete_user(
         "deleted_at": result["deleted_at"].isoformat(),
     }
 
+
 # ============================================================================
-# Admin action log
+# Admin action log - step-up scope: audit.view
 # ============================================================================
 
 @router.get("/actions", response_model=list[AdminActionResponse])
 def admin_list_actions(
     limit: int = 100,
     current_user: User = Depends(require_super_admin),
+    _step_up: User = Depends(require_step_up("audit.view")),
     db: Session = Depends(get_db),
 ):
     rows = (

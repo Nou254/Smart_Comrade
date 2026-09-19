@@ -1,11 +1,12 @@
 """
 Admin endpoints for role management.
-All routes require authentication; write routes require 'role.assign' or Super Admin.
+All routes require authentication; write routes require 'role.assign' or
+'role.revoke' PLUS a fresh step-up token for the corresponding scope.
 """
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, require_permission
+from app.api.deps import get_current_user, require_permission, require_step_up
 from app.db.session import get_db
 from app.models.user import User
 from app.models.role import UserRole
@@ -26,7 +27,7 @@ from app.services.role_service import (
     resolve_user_permissions,
 )
 
-router = APIRouter(prefix="/admin", tags=["Admin — Roles & Permissions"])
+router = APIRouter(prefix="/admin", tags=["Admin - Roles & Permissions"])
 
 
 # ---------- Read: role & permission catalogs ----------
@@ -87,11 +88,13 @@ def get_user_effective_permissions(
 
 
 # ---------- Write: assign / revoke roles ----------
+# Both require a fresh step-up token scoped to the corresponding action.
 
 @router.post("/users/roles/assign", response_model=UserRoleResponse, status_code=201)
 def assign_user_role(
     payload: UserRoleAssign,
     current_user: User = Depends(require_permission("role.assign")),
+    _step_up: User = Depends(require_step_up("role.assign")),
     db: Session = Depends(get_db),
 ):
     try:
@@ -130,6 +133,7 @@ def revoke_user_role(
     user_role_id: str,
     reason: str | None = None,
     current_user: User = Depends(require_permission("role.revoke")),
+    _step_up: User = Depends(require_step_up("role.revoke")),
     db: Session = Depends(get_db),
 ):
     try:
