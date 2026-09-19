@@ -72,7 +72,7 @@ from app.services.jurisdiction_service import is_admin_user
 from app.core.security import (
     verify_password, hash_password,
     decode_2fa_pending_token, decode_admin_setup_token, decode_access_token,
-    create_step_up_token,
+    create_step_up_token, hash_context,
 )
 from app.services.session_service import is_session_valid
 from app.services.audit_service import log_auth_event
@@ -634,6 +634,9 @@ def two_factor_status(
 
 # ============================================================================
 # STEP-UP
+#
+# The issued token is bound to the request's IP and User-Agent. It can only
+# be used from the same context within its 10-minute lifetime.
 # ============================================================================
 
 @router.post("/step-up", response_model=StepUpResponse)
@@ -657,14 +660,21 @@ def step_up(
     if not ok:
         raise HTTPException(status_code=401, detail="Invalid 2FA code.")
 
+    _ip = _client_ip(request)
+    _ua = request.headers.get("user-agent")
+
     token = create_step_up_token(
-        current_user.id, scope=payload.scope, expires_minutes=10,
+        current_user.id,
+        scope=payload.scope,
+        expires_minutes=10,
+        ip_hash=hash_context(_ip),
+        ua_hash=hash_context(_ua),
     )
     log_auth_event(
         db, "step_up_issued",
         user_id=current_user.id, email=current_user.email,
-        ip_address=_client_ip(request),
-        user_agent=request.headers.get("user-agent"),
+        ip_address=_ip,
+        user_agent=_ua,
         event_data={"scope": payload.scope},
     )
     return StepUpResponse(

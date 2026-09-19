@@ -39,7 +39,7 @@ def verify_password(plain: str, hashed: str) -> bool:
 
 
 # ============================================================================
-# JWT — Access tokens
+# JWT - Access tokens
 # ============================================================================
 
 def create_access_token(subject: str, expires_minutes: int | None = None) -> str:
@@ -66,7 +66,7 @@ decode_access_token = decode_token
 
 
 # ============================================================================
-# JWT — Purpose-scoped tokens
+# JWT - Purpose-scoped tokens
 # ============================================================================
 
 def _create_scoped_token(subject: str, purpose: str, expires_minutes: int,
@@ -110,11 +110,41 @@ def decode_admin_setup_token(token: str) -> str | None:
     return payload.get("sub") if payload else None
 
 
-# Step-up (short-lived proof of recent re-authentication for sensitive actions)
-def create_step_up_token(user_id: str, scope: str, expires_minutes: int = 10) -> str:
-    return _create_scoped_token(
-        user_id, "step_up", expires_minutes, extra={"scope": scope}
-    )
+# ============================================================================
+# Step-up (short-lived proof of recent re-authentication)
+#
+# Context binding: tokens are bound to the IP address and User-Agent of the
+# request that issued them. A stolen token cannot be used from a different
+# context. Tokens without context claims are accepted for backward compat.
+# ============================================================================
+
+_CONTEXT_HASH_LENGTH = 16  # hex chars; 64 bits is ample for a 10-min token
+
+
+def hash_context(value: str | None) -> str | None:
+    """One-way fingerprint of a context value (IP or User-Agent).
+
+    Returns None if the input is None, so callers can skip binding a
+    context dimension that is genuinely absent.
+    """
+    if value is None:
+        return None
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:_CONTEXT_HASH_LENGTH]
+
+
+def create_step_up_token(
+    user_id: str,
+    scope: str,
+    expires_minutes: int = 10,
+    ip_hash: str | None = None,
+    ua_hash: str | None = None,
+) -> str:
+    extra: dict[str, Any] = {"scope": scope}
+    if ip_hash is not None:
+        extra["ip_hash"] = ip_hash
+    if ua_hash is not None:
+        extra["ua_hash"] = ua_hash
+    return _create_scoped_token(user_id, "step_up", expires_minutes, extra=extra)
 
 
 def decode_step_up_token(token: str) -> dict | None:
