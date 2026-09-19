@@ -105,6 +105,14 @@ class Session(Base, UUIDMixin, TimestampMixin):
     device_browser: Mapped[str | None] = mapped_column(String(32), nullable=True)
     location: Mapped[str | None] = mapped_column(String(160), nullable=True)
 
+    # --- Break-glass (NEW) ---
+    # True only for sessions issued via the break-glass unlock flow.
+    # These sessions are short-lived (30 min) and every action taken
+    # during them is tagged in the audit log.
+    is_break_glass: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True,
+    )
+
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     is_revoked: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

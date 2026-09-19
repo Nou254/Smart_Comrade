@@ -56,6 +56,14 @@ class User(Base, UUIDMixin, TimestampMixin):
         Boolean, default=False, nullable=False, index=True
     )
 
+    # --- Emergency Account ---
+    # True only for the singleton emergency account used by the break-glass
+    # recovery flow. That account has no usable password and is activated
+    # exclusively via the Shamir 2-of-2 unlock.
+    is_emergency_account: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True
+    )
+
     # --- Account Status ---
     # pending | pending_approval | active | suspended | deactivated | rejected
     account_status: Mapped[str] = mapped_column(
