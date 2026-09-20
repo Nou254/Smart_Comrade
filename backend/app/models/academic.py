@@ -4,8 +4,14 @@ Full hierarchy: Region → County → Institution → School → Course → Unit
 Plus temporal: AcademicYear → Semester
 Plus relationships: StudentEnrollment, UnitMembership
 Plus institutional: InstitutionTransition, InstitutionTransitionRequest
+
+Module 002 completion additions:
+  - StudentEnrollment.combination_id (nullable FK to combinations)
+  - UnitMembership.confirmation_status / confirmed_at / declined_at /
+    decline_reason (drives the "joiner confirms each unit" flow)
 """
 from datetime import date, datetime
+
 from sqlalchemy import (
     CheckConstraint,
     Date,
@@ -102,9 +108,6 @@ class Institution(Base, UUIDMixin, TimestampMixin):
     code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
     type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
 
-    # --- Campus role ---
-    # 'main'   : standalone campus (or one that has been promoted)
-    # 'branch' : a campus that must reference a main campus via parent_institution_id
     campus_role: Mapped[str] = mapped_column(
         String(16), nullable=False, default="main", index=True,
     )
@@ -153,8 +156,6 @@ class Institution(Base, UUIDMixin, TimestampMixin):
 class InstitutionTransition(Base, UUIDMixin, TimestampMixin):
     """
     Immutable history of every accepted structural change to an institution.
-    Created when a Regional Admin or Super Admin performs a transition
-    directly, OR when a pending request is approved.
     """
     __tablename__ = "institution_transitions"
 
@@ -163,18 +164,14 @@ class InstitutionTransition(Base, UUIDMixin, TimestampMixin):
         nullable=False, index=True,
     )
 
-    # 'promote_to_main' | 'change_type' | 'promote_and_change_type'
-    # | 'set_parent' | 'remove_parent' | 'rename' | 'merge' | 'other'
     transition_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
 
-    # Snapshot of pre-change state
     old_campus_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     old_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     old_parent_institution_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True,
     )
 
-    # Post-change state
     new_campus_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     new_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     new_parent_institution_id: Mapped[str | None] = mapped_column(
@@ -182,7 +179,6 @@ class InstitutionTransition(Base, UUIDMixin, TimestampMixin):
     )
 
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    # Charter number, gazette reference, regulatory body reference, etc.
     reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     changed_by: Mapped[str | None] = mapped_column(
@@ -193,7 +189,6 @@ class InstitutionTransition(Base, UUIDMixin, TimestampMixin):
         DateTime(timezone=True), nullable=False,
     )
 
-    # Optionally link back to the request that triggered this transition
     source_request_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("institution_transition_requests.id", ondelete="SET NULL"),
         nullable=True,
@@ -237,7 +232,6 @@ class InstitutionTransitionRequest(Base, UUIDMixin, TimestampMixin):
         DateTime(timezone=True), nullable=False,
     )
 
-    # What the requester wants to happen
     desired_campus_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
     desired_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
     desired_parent_institution_id: Mapped[str | None] = mapped_column(
@@ -264,9 +258,7 @@ class InstitutionTransitionRequest(Base, UUIDMixin, TimestampMixin):
     )
 
     def __repr__(self) -> str:
-        return (
-            f"<InstitutionTransitionRequest {self.id} status={self.status}>"
-        )
+        return f"<InstitutionTransitionRequest {self.id} status={self.status}>"
 
 
 class School(Base, UUIDMixin, TimestampMixin):
@@ -443,6 +435,12 @@ class StudentEnrollment(Base, UUIDMixin, TimestampMixin):
         String(36), ForeignKey("courses.id", ondelete="RESTRICT"),
         nullable=False, index=True,
     )
+    # Optional subject combination (Education Science, etc.).
+    # Only populated when the course has combinations defined.
+    combination_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("combinations.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
     academic_year_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("academic_years.id", ondelete="RESTRICT"),
         nullable=False, index=True,
@@ -470,6 +468,10 @@ class UnitMembership(Base, UUIDMixin, TimestampMixin):
             "status IN ('active','completed','withdrawn')",
             name="ck_unit_membership_status",
         ),
+        CheckConstraint(
+            "confirmation_status IN ('pending','confirmed','declined')",
+            name="ck_unit_membership_confirmation",
+        ),
     )
 
     user_id: Mapped[str] = mapped_column(
@@ -487,8 +489,26 @@ class UnitMembership(Base, UUIDMixin, TimestampMixin):
 
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
 
+    # --- Confirmation (Module 002 completion) ---
+    # When a course's units are approved (or the group's unit list is
+    # curated), members are auto-added with confirmation_status='pending'.
+    # Each member then confirms or declines each unit individually.
+    confirmation_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", index=True,
+    )
+    confirmed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    declined_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    decline_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     def __repr__(self) -> str:
-        return f"<UnitMembership user={self.user_id} unit={self.unit_id}>"
+        return (
+            f"<UnitMembership user={self.user_id} unit={self.unit_id} "
+            f"confirmation={self.confirmation_status}>"
+        )
 
 
 # ============================================================================

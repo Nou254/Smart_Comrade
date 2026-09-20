@@ -5,6 +5,7 @@ from app.models.academic import (
     Region, County, Institution, School, Course, Unit,
     AcademicYear, Semester, StudentEnrollment, UnitMembership,
     AcademicStructureAudit,
+    InstitutionTransition, InstitutionTransitionRequest,
 )
 from app.models.group import (
     Group, GroupMembership, GroupOfficial,
@@ -25,9 +26,20 @@ from app.models.upload import (
     TimetableUpload, UploadFile, UploadScannedPage, ExtractedUnit,
 )
 
-# NEW — Module 001 completeness
+# Module 001 completeness
 from app.models.external_profile import ExternalProfile
 from app.models.notification_preference import NotificationPreference
+
+# Module 002 completion — new models
+from app.models.combination import Combination
+from app.models.unit_offering import UnitOffering
+from app.models.unit_proposal import (
+    UnitProposal, UnitProposalItem, UnitProposalEvent,
+)
+from app.models.registration_verification import (
+    InstitutionVerificationPeriod,
+    InstitutionRegistrationNumber,
+)
 
 __all__ = [
     "Base", "User",
@@ -35,6 +47,7 @@ __all__ = [
     "Region", "County", "Institution", "School", "Course", "Unit",
     "AcademicYear", "Semester", "StudentEnrollment", "UnitMembership",
     "AcademicStructureAudit",
+    "InstitutionTransition", "InstitutionTransitionRequest",
     "Group", "GroupMembership", "GroupOfficial",
     "GroupMeeting", "GroupMeetingAttendee",
     "GroupActivity", "GroupAnnouncement",
@@ -43,6 +56,11 @@ __all__ = [
     "AuthAuditLog", "TwoFactorChallenge",
     "AdminActionLog", "SystemConfig", "AdminInvitation",
     "TimetableUpload", "UploadFile", "UploadScannedPage", "ExtractedUnit",
-    # NEW
+    # Module 001
     "ExternalProfile", "NotificationPreference",
+    # Module 002 completion
+    "Combination",
+    "UnitOffering",
+    "UnitProposal", "UnitProposalItem", "UnitProposalEvent",
+    "InstitutionVerificationPeriod", "InstitutionRegistrationNumber",
 ]

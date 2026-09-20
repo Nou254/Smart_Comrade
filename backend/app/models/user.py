@@ -1,7 +1,12 @@
 """
 User model — Module 001: Identity & Authentication.
+
+Module 002 completion addition:
+  - registration_number : optional per-institution student registration
+    number, used by the pair-based verification system.
 """
 from datetime import datetime
+
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -10,10 +15,7 @@ from app.models.base import Base, TimestampMixin, UUIDMixin
 
 
 class User(Base, UUIDMixin, TimestampMixin):
-    """
-    Core user account table.
-    Holds identity + authentication + verification context.
-    """
+    """Core user account table."""
     __tablename__ = "users"
 
     # --- Identity ---
@@ -30,36 +32,17 @@ class User(Base, UUIDMixin, TimestampMixin):
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # --- User Type ---
-    # student        — ordinary student (self-registered)
-    # lecturer       — academic staff (institutional email verified)
-    # external       — generic external participant
-    # admin          — N.O.U.-appointed platform admin
-    #                  (super_admin, regional_admin)
-    # representative — elected student representative
-    #                  (group / school / institution / county)
-    #
-    # user_type is a coarse classifier for UI and policy tiers.
-    # Authority comes from the user's roles, not from user_type.
     user_type: Mapped[str] = mapped_column(
         String(20), default="student", nullable=False, index=True
     )
-    # For external users: investor | mentor | organization | alumni | specialist
     external_subtype: Mapped[str | None] = mapped_column(String(30), nullable=True)
 
     # --- Bootstrap Admin ---
-    # True if this account was elevated to Super Admin via the
-    # BOOTSTRAP_ADMIN_EMAILS allowlist at email-verification time.
-    # Sticky: once true, the account will not auto-elevate again, even
-    # if the role is later revoked. Used to prevent re-elevation of a
-    # previously-removed admin via re-registration.
     is_bootstrap_admin: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True
     )
 
     # --- Emergency Account ---
-    # True only for the singleton emergency account used by the break-glass
-    # recovery flow. That account has no usable password and is activated
-    # exclusively via the Shamir 2-of-2 unlock.
     is_emergency_account: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True
     )
@@ -74,7 +57,20 @@ class User(Base, UUIDMixin, TimestampMixin):
     email_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    # --- Institutional Context (for students and lecturers) ---
+    # --- Registration Number (Module 002 completion) ---
+    # Optional per-institution student registration number supplied at
+    # registration or later. Used by the pair-based verification system
+    # which matches (reg_number, email) against an institution's roster.
+    registration_number: Mapped[str | None] = mapped_column(
+        String(64), nullable=True, index=True,
+    )
+    # Cached pair-verification state — set true once the pair has been
+    # matched against the institution's roster.
+    registration_number_verified: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False, index=True,
+    )
+
+    # --- Institutional Context ---
     institution_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("institutions.id", ondelete="SET NULL"),
         nullable=True, index=True,
@@ -93,7 +89,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     )
     rejection_reason: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
-    # --- Rejection Metadata (NEW) ---
+    # --- Rejection Metadata ---
     rejected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -104,22 +100,18 @@ class User(Base, UUIDMixin, TimestampMixin):
     # --- Security ---
     two_factor_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     two_factor_secret: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    # Preferred 2FA method: 'totp' | 'email' | 'sms' (NULL if 2FA disabled)
     two_factor_method: Mapped[str | None] = mapped_column(String(10), nullable=True)
-    failed_login_attempts: Mapped[int] = mapped_column(
-        default=0, nullable=False
-    )
+    failed_login_attempts: Mapped[int] = mapped_column(default=0, nullable=False)
     locked_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
 
-    # --- Known Devices (NEW — for security alerts) ---
-    # JSONB list of fingerprint strings like "mobile|Android|Chrome"
+    # --- Known Devices ---
     known_devices: Mapped[list | None] = mapped_column(
         JSONB, nullable=True, default=list,
     )
 
-    # --- Account Lifecycle (NEW) ---
+    # --- Account Lifecycle ---
     deactivated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -127,7 +119,7 @@ class User(Base, UUIDMixin, TimestampMixin):
         DateTime(timezone=True), nullable=True
     )
 
-    # --- Terms / Privacy Acceptance (NEW) ---
+    # --- Terms / Privacy Acceptance ---
     tos_accepted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )

@@ -62,6 +62,8 @@ PERMISSIONS: list[tuple[str, str, str, str]] = [
     ("institution.suspend",       "Suspend institution",           "institution",      "Temporarily suspend institutions"),
     ("institution.reactivate",    "Reactivate institution",        "institution",      "Restore suspended institutions"),
     ("institution.deactivate",    "Deactivate institution",        "institution",      "Deactivate institutions"),
+    ("institution.transition.request", "Request Institution Transition", "institution", "Submit a campus role or type change request for review"),
+    ("institution.transition.review",  "Review Institution Transition",  "institution", "Approve or reject institution transition requests"),
 
     # ── School ───────────────────────────────────────────────
     ("school.create",             "Create school",                 "school",           "Create schools / faculties"),
@@ -264,6 +266,7 @@ def role_permissions_map() -> dict[str, list[str]]:
         "regional_admin": [
             "institution.view", "institution.approve", "institution.reject",
             "institution.suspend", "institution.reactivate", "institution.deactivate",
+            "institution.transition.request", "institution.transition.review",
             "school.view", "course.view", "unit.view",
             "academic_year.view", "semester.view",
             "enrollment.view", "unit_membership.view",
@@ -304,6 +307,7 @@ def role_permissions_map() -> dict[str, list[str]]:
             "unit.create", "unit.edit", "unit.view",
             "unit.deactivate", "unit.reactivate",
             "unit.propose", "unit.approve",
+            "institution.transition.request",
             "academic_year.create", "academic_year.edit", "academic_year.view",
             "semester.create", "semester.edit", "semester.view",
             "enrollment.create", "enrollment.edit", "enrollment.view",
@@ -321,6 +325,7 @@ def role_permissions_map() -> dict[str, list[str]]:
             "school.view", "course.view", "unit.view",
             "academic_year.view", "semester.view",
             "enrollment.view", "unit_membership.view",
+            "institution.transition.request",
             "group.view",
             "notification.manage",
         ],

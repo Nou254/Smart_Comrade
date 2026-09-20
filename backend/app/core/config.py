@@ -132,6 +132,26 @@ class Settings(BaseSettings):
     # ─────────────────────────────────────────────────────────────────
     SMS_ENABLED: bool = False
 
+    # ────────────────────────────────────────────────────────────
+    # Upload pipeline
+    # ────────────────────────────────────────────────────────────
+    UPLOAD_DIR: str = "./uploads"
+    MAX_UPLOAD_SIZE_MB: int = 50
+    MAX_PAGES_PER_FILE: int = 100
+    ALLOWED_UPLOAD_EXTENSIONS: str = "pdf,png,jpg,jpeg,docx,doc,pptx,ppt"
+
+    # ────────────────────────────────────────────────────────────
+    # Module 002 completion — approvals + verification
+    # ────────────────────────────────────────────────────────────
+    # Unit proposal escalation: every N minutes without a response
+    # moves the proposal one level up the approval ladder.
+    UNIT_PROPOSAL_ESCALATION_MINUTES: int = 120
+
+    # Registration-number verification periods: default window in days
+    # when a Super Admin initiates a period without specifying an end.
+    REGISTRATION_VERIFICATION_DEFAULT_DAYS: int = 30
+
+
     class Config:
         env_file = ".env"
         case_sensitive = True

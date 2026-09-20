@@ -11,7 +11,17 @@ Module 002 additions:
   - POST /academic/institution-transition-requests/{id}/approve
   - POST /academic/institution-transition-requests/{id}/reject
   - POST /academic/institution-transition-requests/{id}/withdraw
+
+Module 002 completion additions:
+  - GET  /academic/cascade/options  (bootstrap payload for strict cascade)
+  - POST /academic/unit-memberships/{id}/confirm  (student confirms each unit)
+
+Permission split for transitions:
+  - institution.transition.request : submit a request (Institution Rep)
+  - institution.transition.review  : apply directly OR approve/reject (Regional/Super)
 """
+from datetime import datetime, timezone
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
@@ -20,7 +30,9 @@ from app.api.deps import (
 )
 from app.db.session import get_db
 from app.models.user import User
-from app.models.academic import AcademicYear, Semester, School, Course, Unit
+from app.models.academic import (
+    AcademicYear, Semester, School, Course, Unit, UnitMembership,
+)
 from app.schemas.academic import (
     RegionCreate, RegionResponse,
     CountyCreate, CountyResponse,
@@ -36,6 +48,9 @@ from app.schemas.academic import (
     SemesterCreate, SemesterUpdate, SemesterResponse,
     StudentEnrollmentCreate, StudentEnrollmentUpdate, StudentEnrollmentResponse,
     UnitMembershipCreate, UnitMembershipUpdate, UnitMembershipResponse,
+    # Module 002 completion
+    CascadeOptionsResponse, CascadeInstitutionType,
+    UnitMembershipConfirmationRequest, UnitMembershipConfirmationResponse,
 )
 from app.services.academic_service import (
     AcademicError,
@@ -236,7 +251,7 @@ def patch_institution(
     return result
 
 
-# ─── Institution lifecycle (Super Admin only) ────────────────────────────────
+# ─── Institution lifecycle (Super Admin only) ─────────────────────────────
 
 @router.post("/institutions/{institution_id}/approve", response_model=InstitutionResponse)
 def post_institution_approve(
@@ -326,7 +341,7 @@ def post_institution_deactivate(
     return result
 
 
-# ─── Institution transitions (Regional Admin / Super Admin) ──────────────────
+# ─── Institution transitions (Regional Admin / Super Admin) ───────────────
 #
 # Regional Admin or Super Admin applies a transition directly.
 # Institution Admin uses the request workflow below.
@@ -338,7 +353,7 @@ def post_institution_deactivate(
 def post_institution_transition(
     institution_id: str,
     payload: InstitutionTransitionCreate,
-    current_user: User = Depends(require_permission("institution.edit")),
+    current_user: User = Depends(require_permission("institution.transition.review")),
     db: Session = Depends(get_db),
 ):
     _guard_jurisdiction(db, current_user, "institution", institution_id)
@@ -375,7 +390,7 @@ def get_institution_transitions(
     return list_institution_transitions(db, institution_id)
 
 
-# ─── Institution transition requests (Institution Admin → Regional Admin) ────
+# ─── Institution transition requests (Institution Admin → Regional Admin) ─
 
 @router.post(
     "/institutions/{institution_id}/transition-requests",
@@ -385,7 +400,7 @@ def get_institution_transitions(
 def post_transition_request(
     institution_id: str,
     payload: InstitutionTransitionRequestCreate,
-    current_user: User = Depends(require_permission("institution.edit")),
+    current_user: User = Depends(require_permission("institution.transition.request")),
     db: Session = Depends(get_db),
 ):
     _guard_jurisdiction(db, current_user, "institution", institution_id)
@@ -427,12 +442,12 @@ def get_transition_requests(
 def approve_request(
     request_id: str,
     payload: TransitionReviewRequest,
-    current_user: User = Depends(require_permission("institution.edit")),
+    current_user: User = Depends(require_permission("institution.transition.review")),
     db: Session = Depends(get_db),
 ):
     """
     Approve a pending transition request.
-    Regional Admin / Super Admin. Applies the transition immediately.
+    Regional Admin / Super Admin only. Applies the transition immediately.
     """
     try:
         _inst, transition, req = approve_transition_request(
@@ -455,7 +470,7 @@ def approve_request(
 def reject_request(
     request_id: str,
     payload: TransitionReviewRequest,
-    current_user: User = Depends(require_permission("institution.edit")),
+    current_user: User = Depends(require_permission("institution.transition.review")),
     db: Session = Depends(get_db),
 ):
     try:
@@ -481,6 +496,10 @@ def withdraw_request(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """
+    Withdraw a pending request. Service layer enforces that only the
+    original requester may withdraw.
+    """
     try:
         req = withdraw_transition_request(db, request_id, requester_id=current_user.id)
     except AcademicError as e:
@@ -1100,3 +1119,120 @@ def get_unit_memberships(
     db: Session = Depends(get_db),
 ):
     return list_unit_memberships(db, user_id=user_id, unit_id=unit_id, semester_id=semester_id)
+
+
+# ============================================================================
+# CASCADE OPTIONS — bootstrap payload for the registration cascade
+# ============================================================================
+
+_INSTITUTION_TYPES: list[dict[str, str]] = [
+    {"code": "UNIVERSITY", "label": "University"},
+    {"code": "UNIVERSITY_COLLEGE", "label": "University College"},
+    {"code": "COLLEGE", "label": "College"},
+    {"code": "POLYTECHNIC", "label": "Polytechnic"},
+    {"code": "TVET", "label": "TVET Institution"},
+    {"code": "TECHNICAL_INSTITUTE", "label": "Technical Institute"},
+    {"code": "KMTC", "label": "KMTC"},
+    {"code": "TTC", "label": "Teacher Training College"},
+    {"code": "OTHER", "label": "Other"},
+]
+
+
+@router.get("/cascade/options", response_model=CascadeOptionsResponse)
+def get_cascade_options(
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Bootstrap payload for the strict registration cascade.
+
+    Returns regions, institution types, campus roles, and year levels
+    in a single round trip so the frontend does not need to chain four
+    requests just to render step 1. Deeper levels (counties by region,
+    institutions by county + type + campus_role, schools by institution,
+    courses by school, combinations by course, semesters by academic
+    year) are fetched via the existing filtered endpoints.
+    """
+    return CascadeOptionsResponse(
+        regions=list_regions(db),
+        institution_types=[
+            CascadeInstitutionType(**t) for t in _INSTITUTION_TYPES
+        ],
+        campus_roles=["main", "branch"],
+        year_levels=[1, 2, 3, 4, 5],
+    )
+
+
+# ============================================================================
+# UNIT MEMBERSHIP CONFIRMATION — student confirms/declines each unit
+# ============================================================================
+
+@router.post(
+    "/unit-memberships/{membership_id}/confirm",
+    response_model=UnitMembershipConfirmationResponse,
+)
+def post_unit_membership_confirm(
+    membership_id: str,
+    payload: UnitMembershipConfirmationRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Confirm or decline a unit the student was auto-enrolled into.
+
+    Used during registration cascade and group-join flows: a student is
+    auto-added to the units of their course/semester with
+    confirmation_status='pending', then confirms or declines each.
+    """
+    m = (
+        db.query(UnitMembership)
+        .filter(UnitMembership.id == membership_id)
+        .first()
+    )
+    if not m:
+        raise HTTPException(404, "Unit membership not found.")
+    if m.user_id != current_user.id:
+        raise HTTPException(
+            403, "You can only confirm or decline your own unit memberships.",
+        )
+
+    if payload.confirmation_status not in ("confirmed", "declined"):
+        raise HTTPException(
+            400, "confirmation_status must be 'confirmed' or 'declined'.",
+        )
+    if payload.confirmation_status == "declined" and not payload.decline_reason:
+        raise HTTPException(
+            400, "A decline_reason is required when declining a unit.",
+        )
+
+    now = datetime.now(timezone.utc)
+    m.confirmation_status = payload.confirmation_status
+    if payload.confirmation_status == "confirmed":
+        m.confirmed_at = now
+        m.declined_at = None
+        m.decline_reason = None
+    else:
+        m.declined_at = now
+        m.confirmed_at = None
+        m.decline_reason = payload.decline_reason
+
+    db.commit()
+    db.refresh(m)
+
+    log_admin_action(
+        db, actor_id=current_user.id, action="unit_membership.confirm",
+        target_type="unit_membership", target_id=m.id,
+        new_value=f"status={payload.confirmation_status}",
+    )
+
+    return UnitMembershipConfirmationResponse(
+        membership_id=m.id,
+        confirmation_status=m.confirmation_status,
+        confirmed_at=m.confirmed_at,
+        declined_at=m.declined_at,
+        message=(
+            "Unit confirmed."
+            if payload.confirmation_status == "confirmed"
+            else "Unit declined."
+        ),
+    )

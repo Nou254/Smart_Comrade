@@ -1,15 +1,22 @@
 """
 Pydantic schemas for academic structure.
 
-Module 002 additions:
+Module 002 additions (previous):
   - InstitutionCreate gains campus_role (required)
   - InstitutionUpdate does NOT expose campus_role / parent / type
-    (those go through the transition flow)
-  - New transition schemas: InstitutionTransitionResponse
-  - New request schemas: InstitutionTransitionRequestCreate / Response
-  - MainCampusOption for the branch creation dropdown
+  - InstitutionTransitionResponse
+  - InstitutionTransitionRequestCreate / Response
+  - MainCampusOption
+
+Module 002 completion additions:
+  - StudentEnrollment gets combination_id
+  - UnitMembership gets confirmation_status / confirmed_at / declined_at /
+    decline_reason
+  - UnitMembershipConfirmationRequest / Response
+  - Cascade option schemas for the strict registration flow
 """
 from datetime import date, datetime
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -52,11 +59,6 @@ class CountyResponse(BaseModel):
 # ============================================================================
 
 class InstitutionCreate(BaseModel):
-    """
-    campus_role is required:
-      - 'main'   → standalone campus; parent_institution_id must be null
-      - 'branch' → must supply parent_institution_id pointing at a main campus
-    """
     name: str = Field(..., min_length=2, max_length=200)
     short_name: str | None = Field(None, max_length=50)
     code: str = Field(..., min_length=2, max_length=32)
@@ -67,9 +69,7 @@ class InstitutionCreate(BaseModel):
             "TVET|TECHNICAL_INSTITUTE|KMTC|TTC|OTHER"
         ),
     )
-    campus_role: str = Field(
-        ..., description="main | branch",
-    )
+    campus_role: str = Field(..., description="main | branch")
     county_id: str
     parent_institution_id: str | None = Field(
         None,
@@ -82,11 +82,6 @@ class InstitutionCreate(BaseModel):
 
 
 class InstitutionUpdate(BaseModel):
-    """
-    Structural fields (campus_role, parent_institution_id, type, code,
-    county_id) are intentionally NOT exposed here. Use the transition
-    endpoints for those.
-    """
     name: str | None = Field(None, min_length=2, max_length=200)
     short_name: str | None = None
     physical_address: str | None = None
@@ -117,7 +112,6 @@ class InstitutionResponse(BaseModel):
 
 
 class MainCampusOption(BaseModel):
-    """Compact shape used to populate the 'parent main campus' dropdown."""
     model_config = ConfigDict(from_attributes=True)
     id: str
     code: str
@@ -131,13 +125,7 @@ class MainCampusOption(BaseModel):
 # ============================================================================
 
 class InstitutionTransitionCreate(BaseModel):
-    """
-    Regional Admin / Super Admin applies a transition directly.
-    At least one of the three target fields must differ from current state.
-    """
-    new_campus_role: str | None = Field(
-        None, description="main | branch",
-    )
+    new_campus_role: str | None = Field(None, description="main | branch")
     new_type: str | None = Field(
         None,
         description=(
@@ -145,9 +133,7 @@ class InstitutionTransitionCreate(BaseModel):
             "TVET|TECHNICAL_INSTITUTE|KMTC|TTC|OTHER"
         ),
     )
-    new_parent_institution_id: str | None = Field(
-        None, description="Required if new_campus_role='branch'.",
-    )
+    new_parent_institution_id: str | None = None
     reason: str | None = Field(None, max_length=2000)
     reference: str | None = Field(None, max_length=255)
 
@@ -175,7 +161,6 @@ class InstitutionTransitionResponse(BaseModel):
 # ============================================================================
 
 class InstitutionTransitionRequestCreate(BaseModel):
-    """Institution Admin submits a request for Regional Admin review."""
     desired_campus_role: str | None = Field(None, description="main | branch")
     desired_type: str | None = None
     desired_parent_institution_id: str | None = None
@@ -369,6 +354,13 @@ class StudentEnrollmentCreate(BaseModel):
     user_id: str
     institution_id: str
     course_id: str
+    combination_id: str | None = Field(
+        None,
+        description=(
+            "Optional. Populate only when the course has combinations "
+            "defined and the student selected one during registration."
+        ),
+    )
     academic_year_id: str
     semester_id: str
     start_date: date
@@ -378,6 +370,7 @@ class StudentEnrollmentCreate(BaseModel):
 
 class StudentEnrollmentUpdate(BaseModel):
     status: str | None = None
+    combination_id: str | None = None
     end_date: date | None = None
     notes: str | None = None
 
@@ -388,6 +381,7 @@ class StudentEnrollmentResponse(BaseModel):
     user_id: str
     institution_id: str
     course_id: str
+    combination_id: str | None
     academic_year_id: str
     semester_id: str
     status: str
@@ -411,6 +405,22 @@ class UnitMembershipUpdate(BaseModel):
     status: str | None = None
 
 
+class UnitMembershipConfirmationRequest(BaseModel):
+    """
+    Student's per-unit confirmation after joining a group (or during the
+    course-unit enrollment flow). The confirmation_status field on
+    UnitMembership tracks this — set 'confirmed' or 'declined'.
+    """
+    confirmation_status: str = Field(
+        ..., description="confirmed | declined",
+    )
+    decline_reason: str | None = Field(
+        None,
+        max_length=2000,
+        description="Required if confirmation_status='declined'.",
+    )
+
+
 class UnitMembershipResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
     id: str
@@ -418,4 +428,48 @@ class UnitMembershipResponse(BaseModel):
     unit_id: str
     semester_id: str
     status: str
+    confirmation_status: str
+    confirmed_at: datetime | None
+    declined_at: datetime | None
+    decline_reason: str | None
     created_at: datetime
+
+
+class UnitMembershipConfirmationResponse(BaseModel):
+    """Result of a confirmation or decline action."""
+    membership_id: str
+    confirmation_status: str
+    confirmed_at: datetime | None
+    declined_at: datetime | None
+    message: str
+
+
+# ============================================================================
+# CASCADE OPTIONS (strict registration flow)
+# ============================================================================
+#
+# A single aggregated endpoint returns the static/small datasets the
+# cascade needs to bootstrap, so the frontend doesn't make 4 round trips
+# to render step 1. Deeper levels (counties by region, institutions by
+# county + type + campus_role, schools by institution, courses by school,
+# combinations by course, semesters by academic year) are fetched with
+# the existing filtered endpoints.
+
+class CascadeInstitutionType(BaseModel):
+    code: str
+    label: str
+
+
+class CascadeOptionsResponse(BaseModel):
+    """
+    Bootstrap payload for the registration cascade.
+
+    regions            — all regions, ordered by name
+    institution_types  — static enum of institution types
+    campus_roles       — ['main', 'branch']
+    year_levels        — [1, 2, 3, 4, 5]
+    """
+    regions: list[RegionResponse]
+    institution_types: list[CascadeInstitutionType]
+    campus_roles: list[str]
+    year_levels: list[int]
