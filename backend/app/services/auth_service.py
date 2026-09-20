@@ -3,6 +3,11 @@ Authentication business logic: registration, login, approval, admin 2FA gate.
 Registration stages data in cache until email verification succeeds.
 
 Supports 13 user types including 5 distinct external subtypes.
+
+Phone requirements:
+  - students and alumni: phone optional
+  - lecturers and other external subtypes: phone required (PWA users)
+  - elevated students (alumni, pre-assessed mentors): phone optional (inherited)
 """
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.orm import Session
@@ -60,7 +65,7 @@ class CaptchaRequired(Exception):
         super().__init__(self.message)
 
 
-# ── Constants ──────────────────────────────────────────────────
+# ── Constants ───────────────────────────────────────────────────────────────
 
 APPROVAL_REQUIRED_TYPES = {"lecturer", "external"}
 AUTO_ACTIVE_EXTERNAL = {"alumni"}
@@ -83,7 +88,7 @@ CURRENT_PRIVACY_VERSION = "1.0"
 OTP_EXPIRY_MINUTES = 15
 
 
-# ── Helpers ────────────────────────────────────────────────────
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
 def _email_domain_matches(email: str, institution: Institution) -> bool:
     if not email or "@" not in email:
@@ -114,9 +119,17 @@ def _check_uniqueness(db: Session, email: str, phone: str | None) -> None:
         raise AuthError("An account with this phone number already exists.", 409)
 
     if registration_cache.get_pending(email):
-        raise AuthError("A registration is already pending for this email.", 409)
+        raise AuthError(
+            "A registration is already pending for this email. "
+            "If you did not receive the OTP, use the resend endpoint.",
+            409,
+        )
     if phone and registration_cache.is_phone_pending(phone):
-        raise AuthError("A registration is already pending for this phone.", 409)
+        raise AuthError(
+            "A registration is already pending for this phone number. "
+            "If you did not receive the OTP, use the resend endpoint.",
+            409,
+        )
 
 
 def _stage_registration(
@@ -219,15 +232,22 @@ def register_student(db: Session, data: StudentRegister) -> dict:
 
 
 def register_lecturer(db: Session, data: LecturerRegister) -> dict:
+    """Lecturer registration — first affiliation + referee stored in cache."""
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
+
     inst = db.query(Institution).filter(Institution.id == data.institution_id).first()
     if not inst:
         raise AuthError("Institution not found.", 404)
+
     valid_titles = {"Lecturer", "Senior Lecturer", "Professor", "Assistant Lecturer"}
     if data.title not in valid_titles:
         raise AuthError(f"Invalid title. Must be one of: {sorted(valid_titles)}")
+
     domain_ok = _email_domain_matches(str(data.institutional_email), inst)
 
+    # Referee is per-affiliation. For the first affiliation, we capture the
+    # referee in the cache record's `extra` dict, and the promotion step
+    # (verify_pending_registration) creates the LecturerAffiliation row.
     return _stage_registration(
         db,
         first_name=data.first_name, last_name=data.last_name,
@@ -237,6 +257,11 @@ def register_lecturer(db: Session, data: LecturerRegister) -> dict:
         department=data.department, title=data.title,
         domain_verified=domain_ok,
         tos_version=data.tos_version, privacy_version=data.privacy_version,
+        extra={
+            "referee_name": data.referee_name,
+            "referee_phone": data.referee_phone,
+            "referee_relationship": data.referee_relationship,
+        },
     )
 
 
@@ -305,6 +330,7 @@ def register_organization(db: Session, data: OrganizationRegister) -> dict:
 
 
 def register_alumni(db: Session, data: AlumniRegister) -> dict:
+    """Alumni registration — phone optional (elevated-student exception)."""
     _require_tos_privacy(data.tos_accepted, data.privacy_accepted)
     return _stage_external(
         db, subtype="alumni",
@@ -360,7 +386,7 @@ def register_specialist(db: Session, data: SpecialistRegister) -> dict:
 
 
 # ============================================================================
-# LOGIN (unchanged behavior; still uses the users table)
+# LOGIN
 # ============================================================================
 
 def login_user(
@@ -372,7 +398,6 @@ def login_user(
 ) -> tuple[User, str, dict]:
     user = db.query(User).filter(User.email == data.email.lower().strip()).first()
     if not user:
-        # Check if the email is pending registration
         pending = registration_cache.get_pending(str(data.email))
         if pending:
             log_auth_event(
@@ -556,6 +581,22 @@ def approve_user(
         if profile:
             profile.verification_status = "approved"
 
+        # If this is a lecturer, also mark the primary affiliation as verified.
+        if user.user_type == "lecturer":
+            from app.models.lecturer_affiliation import LecturerAffiliation
+            affs = (
+                db.query(LecturerAffiliation)
+                .filter(
+                    LecturerAffiliation.user_id == user.id,
+                    LecturerAffiliation.verification_status == "pending",
+                )
+                .all()
+            )
+            for aff in affs:
+                aff.verification_status = "verified"
+                aff.approved_by = approver_id
+                aff.approved_at = now
+
         log_auth_event(
             db, "account_approved", user_id=user.id, email=user.email,
             event_data={"approver": approver_id},
@@ -572,6 +613,21 @@ def approve_user(
         if profile:
             profile.verification_status = "rejected"
             profile.verification_notes = reason
+
+        # Reject any pending lecturer affiliations too
+        if user.user_type == "lecturer":
+            from app.models.lecturer_affiliation import LecturerAffiliation
+            affs = (
+                db.query(LecturerAffiliation)
+                .filter(
+                    LecturerAffiliation.user_id == user.id,
+                    LecturerAffiliation.verification_status == "pending",
+                )
+                .all()
+            )
+            for aff in affs:
+                aff.verification_status = "rejected"
+                aff.verification_notes = reason
 
         log_auth_event(
             db, "account_rejected", user_id=user.id, email=user.email,

@@ -1,6 +1,8 @@
 from fastapi import FastAPI
 
-from app.api import auth, admin_roles, academic, group, admin, upload, break_glass
+from app.api import (
+    auth, admin_roles, academic, group, admin, upload, break_glass, lecturer,
+)
 from app.core.config import settings
 
 app = FastAPI(
@@ -16,6 +18,7 @@ app.include_router(group.router)
 app.include_router(admin.router)
 app.include_router(upload.router)
 app.include_router(break_glass.router)
+app.include_router(lecturer.router)
 
 
 @app.get("/health", tags=["Health"])

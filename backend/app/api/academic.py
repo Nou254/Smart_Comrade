@@ -1,5 +1,16 @@
 """
 Academic structure endpoints — Module 002.
+
+Module 002 additions:
+  - campus_role validation on institution create
+  - GET  /academic/institutions/main-campuses   (dropdown helper)
+  - POST /academic/institutions/{id}/transition (Regional Admin / Super Admin)
+  - GET  /academic/institutions/{id}/transitions (history)
+  - POST /academic/institutions/{id}/transition-requests  (Institution Admin)
+  - GET  /academic/institution-transition-requests?institution_id=...
+  - POST /academic/institution-transition-requests/{id}/approve
+  - POST /academic/institution-transition-requests/{id}/reject
+  - POST /academic/institution-transition-requests/{id}/withdraw
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
@@ -14,6 +25,10 @@ from app.schemas.academic import (
     RegionCreate, RegionResponse,
     CountyCreate, CountyResponse,
     InstitutionCreate, InstitutionUpdate, InstitutionResponse,
+    MainCampusOption,
+    InstitutionTransitionCreate, InstitutionTransitionResponse,
+    InstitutionTransitionRequestCreate, InstitutionTransitionRequestResponse,
+    TransitionReviewRequest,
     SchoolCreate, SchoolUpdate, SchoolResponse,
     CourseCreate, CourseUpdate, CourseResponse,
     UnitCreate, UnitUpdate, UnitResponse,
@@ -31,6 +46,13 @@ from app.services.academic_service import (
     create_institution, list_institutions, get_institution, update_institution,
     approve_institution, reject_institution,
     suspend_institution, reactivate_institution, deactivate_institution,
+    list_main_campuses,
+    # Institution transitions
+    transition_institution, list_institution_transitions,
+    request_transition, list_pending_transition_requests,
+    get_transition_request,
+    approve_transition_request, reject_transition_request,
+    withdraw_transition_request,
     # School
     create_school, list_schools, update_school,
     deactivate_school, reactivate_school,
@@ -145,7 +167,7 @@ def post_institution(
     log_admin_action(
         db, actor_id=current_user.id, action="institution.create",
         target_type="institution", target_id=result.id,
-        new_value=getattr(result, "name", None),
+        new_value=f"{getattr(result, 'name', None)} ({result.campus_role})",
     )
     return result
 
@@ -155,12 +177,31 @@ def get_institutions(
     county_id: str | None = Query(None),
     type_filter: str | None = Query(None, alias="type"),
     status_filter: str | None = Query(None, alias="status"),
+    campus_role: str | None = Query(None),
+    parent_institution_id: str | None = Query(None),
     _: User = Depends(require_permission("institution.view")),
     db: Session = Depends(get_db),
 ):
-    return list_institutions(db, county_id=county_id,
-                             type_filter=type_filter,
-                             status_filter=status_filter)
+    return list_institutions(
+        db,
+        county_id=county_id,
+        type_filter=type_filter,
+        status_filter=status_filter,
+        campus_role=campus_role,
+        parent_institution_id=parent_institution_id,
+    )
+
+
+@router.get("/institutions/main-campuses", response_model=list[MainCampusOption])
+def get_main_campuses(
+    _: User = Depends(require_permission("institution.view")),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns all main campuses for the branch-creation dropdown.
+    Kept deliberately small — id, code, name, type, county_id only.
+    """
+    return list_main_campuses(db)
 
 
 @router.get("/institutions/{institution_id}", response_model=InstitutionResponse)
@@ -195,7 +236,7 @@ def patch_institution(
     return result
 
 
-# ── Institution lifecycle (Super Admin only) ─────────────────────────────
+# ─── Institution lifecycle (Super Admin only) ────────────────────────────────
 
 @router.post("/institutions/{institution_id}/approve", response_model=InstitutionResponse)
 def post_institution_approve(
@@ -283,6 +324,172 @@ def post_institution_deactivate(
         target_type="institution", target_id=institution_id, reason=reason,
     )
     return result
+
+
+# ─── Institution transitions (Regional Admin / Super Admin) ──────────────────
+#
+# Regional Admin or Super Admin applies a transition directly.
+# Institution Admin uses the request workflow below.
+
+@router.post(
+    "/institutions/{institution_id}/transition",
+    response_model=InstitutionTransitionResponse,
+)
+def post_institution_transition(
+    institution_id: str,
+    payload: InstitutionTransitionCreate,
+    current_user: User = Depends(require_permission("institution.edit")),
+    db: Session = Depends(get_db),
+):
+    _guard_jurisdiction(db, current_user, "institution", institution_id)
+    try:
+        _inst, transition = transition_institution(
+            db,
+            institution_id=institution_id,
+            actor_id=current_user.id,
+            new_campus_role=payload.new_campus_role,
+            new_type=payload.new_type,
+            new_parent_institution_id=payload.new_parent_institution_id,
+            reason=payload.reason,
+            reference=payload.reference,
+        )
+    except AcademicError as e:
+        _err(e)
+    log_admin_action(
+        db, actor_id=current_user.id, action="institution.transition",
+        target_type="institution", target_id=institution_id,
+        new_value=transition.transition_type, reason=payload.reason,
+    )
+    return transition
+
+
+@router.get(
+    "/institutions/{institution_id}/transitions",
+    response_model=list[InstitutionTransitionResponse],
+)
+def get_institution_transitions(
+    institution_id: str,
+    _: User = Depends(require_permission("institution.view")),
+    db: Session = Depends(get_db),
+):
+    return list_institution_transitions(db, institution_id)
+
+
+# ─── Institution transition requests (Institution Admin → Regional Admin) ────
+
+@router.post(
+    "/institutions/{institution_id}/transition-requests",
+    response_model=InstitutionTransitionRequestResponse,
+    status_code=201,
+)
+def post_transition_request(
+    institution_id: str,
+    payload: InstitutionTransitionRequestCreate,
+    current_user: User = Depends(require_permission("institution.edit")),
+    db: Session = Depends(get_db),
+):
+    _guard_jurisdiction(db, current_user, "institution", institution_id)
+    try:
+        req = request_transition(
+            db, institution_id, requester_id=current_user.id,
+            desired_campus_role=payload.desired_campus_role,
+            desired_type=payload.desired_type,
+            desired_parent_institution_id=payload.desired_parent_institution_id,
+            reason=payload.reason,
+            reference=payload.reference,
+        )
+    except AcademicError as e:
+        _err(e)
+    log_admin_action(
+        db, actor_id=current_user.id, action="institution.transition_request",
+        target_type="institution_transition_request", target_id=req.id,
+        new_value=f"institution={institution_id}", reason=payload.reason,
+    )
+    return req
+
+
+@router.get(
+    "/institution-transition-requests",
+    response_model=list[InstitutionTransitionRequestResponse],
+)
+def get_transition_requests(
+    institution_id: str | None = Query(None),
+    current_user: User = Depends(require_permission("institution.view")),
+    db: Session = Depends(get_db),
+):
+    return list_pending_transition_requests(db, institution_id=institution_id)
+
+
+@router.post(
+    "/institution-transition-requests/{request_id}/approve",
+    response_model=InstitutionTransitionRequestResponse,
+)
+def approve_request(
+    request_id: str,
+    payload: TransitionReviewRequest,
+    current_user: User = Depends(require_permission("institution.edit")),
+    db: Session = Depends(get_db),
+):
+    """
+    Approve a pending transition request.
+    Regional Admin / Super Admin. Applies the transition immediately.
+    """
+    try:
+        _inst, transition, req = approve_transition_request(
+            db, request_id, reviewer_id=current_user.id, notes=payload.notes,
+        )
+    except AcademicError as e:
+        _err(e)
+    log_admin_action(
+        db, actor_id=current_user.id, action="institution.transition_request.approve",
+        target_type="institution_transition_request", target_id=request_id,
+        new_value=transition.transition_type, reason=payload.notes,
+    )
+    return req
+
+
+@router.post(
+    "/institution-transition-requests/{request_id}/reject",
+    response_model=InstitutionTransitionRequestResponse,
+)
+def reject_request(
+    request_id: str,
+    payload: TransitionReviewRequest,
+    current_user: User = Depends(require_permission("institution.edit")),
+    db: Session = Depends(get_db),
+):
+    try:
+        req = reject_transition_request(
+            db, request_id, reviewer_id=current_user.id, notes=payload.notes,
+        )
+    except AcademicError as e:
+        _err(e)
+    log_admin_action(
+        db, actor_id=current_user.id, action="institution.transition_request.reject",
+        target_type="institution_transition_request", target_id=request_id,
+        reason=payload.notes,
+    )
+    return req
+
+
+@router.post(
+    "/institution-transition-requests/{request_id}/withdraw",
+    response_model=InstitutionTransitionRequestResponse,
+)
+def withdraw_request(
+    request_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        req = withdraw_transition_request(db, request_id, requester_id=current_user.id)
+    except AcademicError as e:
+        _err(e)
+    log_admin_action(
+        db, actor_id=current_user.id, action="institution.transition_request.withdraw",
+        target_type="institution_transition_request", target_id=request_id,
+    )
+    return req
 
 
 # ============================================================================

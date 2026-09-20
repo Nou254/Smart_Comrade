@@ -3,6 +3,7 @@ Academic structure models — Module 002.
 Full hierarchy: Region → County → Institution → School → Course → Unit
 Plus temporal: AcademicYear → Semester
 Plus relationships: StudentEnrollment, UnitMembership
+Plus institutional: InstitutionTransition, InstitutionTransitionRequest
 """
 from datetime import date, datetime
 from sqlalchemy import (
@@ -70,18 +71,28 @@ class County(Base, UUIDMixin, TimestampMixin):
 class Institution(Base, UUIDMixin, TimestampMixin):
     """
     Educational institution.
-    Types: UNIVERSITY | COLLEGE | TVET | POLYTECHNIC | KMTC | OTHER
-    Can be a branch of a parent institution.
+
+    type        : one of UNIVERSITY | UNIVERSITY_COLLEGE | COLLEGE |
+                  POLYTECHNIC | TVET | TECHNICAL_INSTITUTE | KMTC | TTC | OTHER
+    campus_role : 'main' (standalone) or 'branch' (references a main campus)
     """
     __tablename__ = "institutions"
     __table_args__ = (
         CheckConstraint(
-            "type IN ('UNIVERSITY','COLLEGE','TVET','POLYTECHNIC','KMTC','OTHER')",
+            "type IN ("
+            "'UNIVERSITY','UNIVERSITY_COLLEGE','COLLEGE',"
+            "'POLYTECHNIC','TVET','TECHNICAL_INSTITUTE',"
+            "'KMTC','TTC','OTHER'"
+            ")",
             name="ck_institution_type",
         ),
         CheckConstraint(
-            "status IN ('pending','active','suspended','deactivated')",
+            "status IN ('pending','active','suspended','deactivated','rejected')",
             name="ck_institution_status",
+        ),
+        CheckConstraint(
+            "campus_role IN ('main','branch')",
+            name="ck_institution_campus_role",
         ),
         UniqueConstraint("code", name="uq_institution_code"),
     )
@@ -89,7 +100,14 @@ class Institution(Base, UUIDMixin, TimestampMixin):
     name: Mapped[str] = mapped_column(String(200), nullable=False, index=True)
     short_name: Mapped[str | None] = mapped_column(String(50), nullable=True)
     code: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
-    type: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+
+    # --- Campus role ---
+    # 'main'   : standalone campus (or one that has been promoted)
+    # 'branch' : a campus that must reference a main campus via parent_institution_id
+    campus_role: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="main", index=True,
+    )
 
     county_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("counties.id", ondelete="RESTRICT"),
@@ -122,9 +140,133 @@ class Institution(Base, UUIDMixin, TimestampMixin):
     academic_years: Mapped[list["AcademicYear"]] = relationship(
         "AcademicYear", back_populates="institution", cascade="all, delete-orphan"
     )
+    transitions: Mapped[list["InstitutionTransition"]] = relationship(
+        "InstitutionTransition", back_populates="institution",
+        cascade="all, delete-orphan",
+        foreign_keys="InstitutionTransition.institution_id",
+    )
 
     def __repr__(self) -> str:
-        return f"<Institution {self.code} - {self.name}>"
+        return f"<Institution {self.code} ({self.campus_role}) - {self.name}>"
+
+
+class InstitutionTransition(Base, UUIDMixin, TimestampMixin):
+    """
+    Immutable history of every accepted structural change to an institution.
+    Created when a Regional Admin or Super Admin performs a transition
+    directly, OR when a pending request is approved.
+    """
+    __tablename__ = "institution_transitions"
+
+    institution_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("institutions.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+
+    # 'promote_to_main' | 'change_type' | 'promote_and_change_type'
+    # | 'set_parent' | 'remove_parent' | 'rename' | 'merge' | 'other'
+    transition_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+
+    # Snapshot of pre-change state
+    old_campus_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    old_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    old_parent_institution_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    # Post-change state
+    new_campus_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    new_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    new_parent_institution_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Charter number, gazette reference, regulatory body reference, etc.
+    reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    changed_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True, index=True,
+    )
+    changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+
+    # Optionally link back to the request that triggered this transition
+    source_request_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("institution_transition_requests.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    institution: Mapped[Institution] = relationship(
+        "Institution", back_populates="transitions",
+        foreign_keys=[institution_id],
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<InstitutionTransition {self.transition_type} "
+            f"institution={self.institution_id}>"
+        )
+
+
+class InstitutionTransitionRequest(Base, UUIDMixin, TimestampMixin):
+    """
+    A pending request by an Institution Admin to change campus role and/or
+    institution type. Regional Admin reviews; Super Admin is cc'd.
+    """
+    __tablename__ = "institution_transition_requests"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','approved','rejected','withdrawn')",
+            name="ck_transition_request_status",
+        ),
+    )
+
+    institution_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("institutions.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+
+    requested_by: Mapped[str] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=False, index=True,
+    )
+    requested_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+    )
+
+    # What the requester wants to happen
+    desired_campus_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    desired_type: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    desired_parent_institution_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("institutions.id", ondelete="SET NULL"), nullable=True,
+    )
+
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="pending", index=True,
+    )
+
+    reviewed_by: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("users.id", ondelete="SET NULL"), nullable=True,
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    institution: Mapped[Institution] = relationship(
+        "Institution", foreign_keys=[institution_id],
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<InstitutionTransitionRequest {self.id} status={self.status}>"
+        )
 
 
 class School(Base, UUIDMixin, TimestampMixin):

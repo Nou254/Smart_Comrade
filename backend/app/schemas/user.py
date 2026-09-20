@@ -7,6 +7,9 @@ from pydantic import BaseModel, EmailStr, Field, ConfigDict
 
 # ============================================================================
 # REGISTRATION REQUEST SCHEMAS
+#
+# Phone requirements (PWA users must declare phone; students and alumni may
+# omit it; elevated students inherit their existing phone and skip this).
 # ============================================================================
 
 class StudentRegister(BaseModel):
@@ -21,7 +24,7 @@ class StudentRegister(BaseModel):
     course_id: str | None = None
     academic_year_id: str | None = None
     semester_id: str | None = None
-    # --- Terms / Privacy acceptance (NEW) ---
+    # --- Terms / Privacy acceptance ---
     tos_accepted: bool = Field(..., description="Must be true to register")
     privacy_accepted: bool = Field(..., description="Must be true to register")
     tos_version: str | None = Field("1.0", max_length=32)
@@ -29,16 +32,26 @@ class StudentRegister(BaseModel):
 
 
 class LecturerRegister(BaseModel):
-    """Lecturer registration — institutional email + admin approval required."""
+    """Lecturer registration — phone + referee + admin approval required.
+
+    The first affiliation is captured here. Additional affiliations are added
+    post-login via POST /lecturers/affiliations.
+    """
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
     institutional_email: EmailStr
-    phone: str | None = Field(None, max_length=20)
+    phone: str = Field(..., min_length=7, max_length=20)  # required for PWA users
     password: str = Field(..., min_length=8, max_length=72)
     institution_id: str
     department: str | None = Field(None, max_length=150)
     title: str = Field(..., description="Lecturer | Senior Lecturer | Professor | Assistant Lecturer")
+
+    # --- Referee (verified via phone call by admin) ---
+    referee_name: str = Field(..., min_length=2, max_length=160)
+    referee_phone: str = Field(..., min_length=7, max_length=20)
+    referee_relationship: str = Field(..., min_length=2, max_length=120)
+
     tos_accepted: bool = Field(...)
     privacy_accepted: bool = Field(...)
     tos_version: str | None = Field("1.0", max_length=32)
@@ -50,7 +63,7 @@ class ExternalRegister(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
-    phone: str | None = Field(None, max_length=20)
+    phone: str = Field(..., min_length=7, max_length=20)  # required for PWA users
     password: str = Field(..., min_length=8, max_length=72)
     external_subtype: str = Field(
         ...,
@@ -65,15 +78,14 @@ class ExternalRegister(BaseModel):
     privacy_version: str | None = Field("1.0", max_length=32)
 
 
-# --- External subtype-specific schemas (NEW) ---
+# --- External subtype-specific schemas ---
 
 class InvestorRegister(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
-    phone: str | None = Field(None, max_length=20)
+    phone: str = Field(..., min_length=7, max_length=20)  # required for PWA users
     password: str = Field(..., min_length=8, max_length=72)
-    # Role-specific fields
     organization_name: str = Field(..., min_length=1, max_length=255)
     role_in_organization: str | None = Field(None, max_length=120)
     investment_focus: str | None = Field(None, max_length=2000)
@@ -87,14 +99,12 @@ class OrganizationRegister(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
-    phone: str | None = Field(None, max_length=20)
+    phone: str = Field(..., min_length=7, max_length=20)  # required for PWA users
     password: str = Field(..., min_length=8, max_length=72)
-    # Organization
     organization_name: str = Field(..., min_length=1, max_length=255)
     organization_type: str = Field(..., description="Company | NGO | Government | Institution")
     industry: str = Field(..., description="Technology | Education | Healthcare | ...")
     registration_number: str | None = Field(None, max_length=64)
-    # Contact
     contact_name: str | None = Field(None, max_length=160)
     contact_email: EmailStr | None = None
     contact_phone: str | None = Field(None, max_length=32)
@@ -105,12 +115,12 @@ class OrganizationRegister(BaseModel):
 
 
 class AlumniRegister(BaseModel):
+    """Alumni registration — phone optional (elevated-student exception)."""
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
-    phone: str | None = Field(None, max_length=20)
+    phone: str | None = Field(None, max_length=20)  # optional for alumni
     password: str = Field(..., min_length=8, max_length=72)
-    # Background
     former_institution: str = Field(..., min_length=1, max_length=255)
     graduation_year: int = Field(..., ge=1950, le=2100)
     current_profession: str | None = Field(None, max_length=160)
@@ -125,9 +135,8 @@ class MentorRegister(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
-    phone: str | None = Field(None, max_length=20)
+    phone: str = Field(..., min_length=7, max_length=20)  # required for PWA users
     password: str = Field(..., min_length=8, max_length=72)
-    # Professional
     profession: str = Field(..., min_length=1, max_length=160)
     areas_of_expertise: list[str] = Field(..., min_length=1)
     experience_summary: str = Field(..., min_length=10, max_length=1000)
@@ -142,9 +151,8 @@ class SpecialistRegister(BaseModel):
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: EmailStr
-    phone: str | None = Field(None, max_length=20)
+    phone: str = Field(..., min_length=7, max_length=20)  # required for PWA users
     password: str = Field(..., min_length=8, max_length=72)
-    # Expertise
     field_of_expertise: str = Field(..., min_length=1, max_length=160)
     affiliated_organization: str | None = Field(None, max_length=255)
     tos_accepted: bool = Field(...)
@@ -160,7 +168,6 @@ class SpecialistRegister(BaseModel):
 class UserLogin(BaseModel):
     email: EmailStr
     password: str
-    # --- CAPTCHA (NEW) — required only when threshold is hit ---
     captcha_token: str | None = None
 
 
@@ -217,8 +224,6 @@ class PendingApprovalResponse(BaseModel):
     account_status: str
     created_at: datetime
 
-
-# --- External profile response (NEW) ---
 
 class ExternalProfileResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)

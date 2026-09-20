@@ -1,13 +1,31 @@
 """
 Business logic for academic structure management.
+
+Includes:
+  - Region / County / Institution / School / Course / Unit CRUD
+  - Academic Year / Semester
+  - Student Enrollment / Unit Membership
+  - Institution campus role (main / branch)
+  - Institution transitions (promote to main, change type) — immutable history
+  - Institution transition requests — Institution Admin → Regional Admin workflow
 """
+from datetime import datetime, timezone
 from sqlalchemy.orm import Session
 
 from app.models.academic import (
     Region, County, Institution, School, Course, Unit,
     AcademicYear, Semester, StudentEnrollment, UnitMembership,
     AcademicStructureAudit,
+    InstitutionTransition, InstitutionTransitionRequest,
 )
+
+
+VALID_INSTITUTION_TYPES = {
+    "UNIVERSITY", "UNIVERSITY_COLLEGE", "COLLEGE",
+    "POLYTECHNIC", "TVET", "TECHNICAL_INSTITUTE",
+    "KMTC", "TTC", "OTHER",
+}
+VALID_CAMPUS_ROLES = {"main", "branch"}
 
 
 class AcademicError(Exception):
@@ -35,13 +53,16 @@ def _apply_update(db: Session, entity, data, *, protected_fields: set[str] | Non
     for field, value in changes.items():
         if field in protected:
             continue
-        # Normalize certain fields
         if field in ("code",) and isinstance(value, str):
             value = value.strip().upper()
         if field in ("name",) and isinstance(value, str):
             value = value.strip()
         setattr(entity, field, value)
     return changes, old_snapshot
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
 
 
 # ============================================================================
@@ -96,21 +117,49 @@ def create_institution(db: Session, data, user_id: str | None = None) -> Institu
         raise AcademicError(f"Institution code '{data.code}' already exists.", 409)
     if not db.query(County).filter(County.id == data.county_id).first():
         raise AcademicError("County not found.", 404)
-    if data.parent_institution_id:
-        if not db.query(Institution).filter(Institution.id == data.parent_institution_id).first():
-            raise AcademicError("Parent institution not found.", 404)
 
-    valid_types = {"UNIVERSITY", "COLLEGE", "TVET", "POLYTECHNIC", "KMTC", "OTHER"}
-    if data.type not in valid_types:
-        raise AcademicError(f"Invalid type. Must be one of: {sorted(valid_types)}")
+    if data.type not in VALID_INSTITUTION_TYPES:
+        raise AcademicError(
+            f"Invalid type. Must be one of: {sorted(VALID_INSTITUTION_TYPES)}"
+        )
+
+    campus_role = (getattr(data, "campus_role", None) or "main").lower()
+    if campus_role not in VALID_CAMPUS_ROLES:
+        raise AcademicError(
+            f"Invalid campus_role. Must be one of: {sorted(VALID_CAMPUS_ROLES)}"
+        )
+
+    parent_id = getattr(data, "parent_institution_id", None)
+
+    # ─── Campus role / parent validation ──────────────────────────────────
+    if campus_role == "branch":
+        if not parent_id:
+            raise AcademicError(
+                "A branch campus must specify its parent main campus.", 400,
+            )
+        parent = db.query(Institution).filter(Institution.id == parent_id).first()
+        if not parent:
+            raise AcademicError("Parent institution not found.", 404)
+        if parent.campus_role != "main":
+            raise AcademicError(
+                "The parent institution must itself be a main campus.", 409,
+            )
+    else:  # main
+        if parent_id:
+            raise AcademicError(
+                "A main campus cannot have a parent institution. "
+                "Use campus_role='branch' to reference a parent.",
+                400,
+            )
 
     inst = Institution(
         name=data.name.strip(),
         short_name=data.short_name,
         code=data.code.strip().upper(),
         type=data.type,
+        campus_role=campus_role,
         county_id=data.county_id,
-        parent_institution_id=data.parent_institution_id,
+        parent_institution_id=parent_id,
         physical_address=data.physical_address,
         email=data.email,
         phone=data.phone,
@@ -118,14 +167,17 @@ def create_institution(db: Session, data, user_id: str | None = None) -> Institu
         status="pending",
     )
     db.add(inst); db.flush()
-    _audit(db, user_id, "Institution", inst.id, "CREATE", new_value=inst.name)
+    _audit(db, user_id, "Institution", inst.id, "CREATE",
+           new_value=f"{inst.name} ({campus_role})")
     db.commit(); db.refresh(inst)
     return inst
 
 
 def list_institutions(db: Session, county_id: str | None = None,
                       type_filter: str | None = None,
-                      status_filter: str | None = None) -> list[Institution]:
+                      status_filter: str | None = None,
+                      campus_role: str | None = None,
+                      parent_institution_id: str | None = None) -> list[Institution]:
     q = db.query(Institution)
     if county_id:
         q = q.filter(Institution.county_id == county_id)
@@ -133,7 +185,27 @@ def list_institutions(db: Session, county_id: str | None = None,
         q = q.filter(Institution.type == type_filter)
     if status_filter:
         q = q.filter(Institution.status == status_filter)
+    if campus_role:
+        q = q.filter(Institution.campus_role == campus_role)
+    if parent_institution_id:
+        q = q.filter(Institution.parent_institution_id == parent_institution_id)
     return q.order_by(Institution.name).all()
+
+
+def list_main_campuses(db: Session) -> list[Institution]:
+    """
+    All institutions that are main campuses and are not deactivated.
+    Used to populate the parent dropdown when creating a branch.
+    """
+    return (
+        db.query(Institution)
+        .filter(
+            Institution.campus_role == "main",
+            Institution.status.in_(["active", "pending", "suspended"]),
+        )
+        .order_by(Institution.name)
+        .all()
+    )
 
 
 def get_institution(db: Session, institution_id: str) -> Institution:
@@ -143,10 +215,18 @@ def get_institution(db: Session, institution_id: str) -> Institution:
     return inst
 
 
-def update_institution(db: Session, institution_id: str, data, user_id: str | None = None) -> Institution:
+def update_institution(db: Session, institution_id: str, data,
+                       user_id: str | None = None) -> Institution:
     inst = get_institution(db, institution_id)
     old_status = inst.status
-    _apply_update(db, inst, data)
+
+    # Protect structural fields — those change only via the transition flow.
+    _apply_update(
+        db, inst, data,
+        protected_fields={
+            "campus_role", "parent_institution_id", "type", "code", "county_id",
+        },
+    )
     _audit(db, user_id, "Institution", inst.id, "UPDATE",
            old_value=f"status={old_status}", new_value=f"status={inst.status}")
     db.commit(); db.refresh(inst)
@@ -216,6 +296,339 @@ def deactivate_institution(db: Session, institution_id: str, reason: str | None 
 
 
 # ============================================================================
+# INSTITUTION TRANSITIONS (promote / change type / etc.)
+# ============================================================================
+
+def _validate_transition_target(
+    db: Session,
+    institution: Institution,
+    new_campus_role: str | None,
+    new_type: str | None,
+    new_parent_institution_id: str | None,
+) -> None:
+    """Validate the desired end state."""
+    target_role = (new_campus_role or institution.campus_role).lower()
+    target_type = (new_type or institution.type).upper()
+    target_parent = (
+        new_parent_institution_id
+        if new_campus_role is not None
+        else institution.parent_institution_id
+    )
+
+    if target_role not in VALID_CAMPUS_ROLES:
+        raise AcademicError(
+            f"Invalid campus_role. Must be one of: {sorted(VALID_CAMPUS_ROLES)}"
+        )
+    if target_type not in VALID_INSTITUTION_TYPES:
+        raise AcademicError(
+            f"Invalid type. Must be one of: {sorted(VALID_INSTITUTION_TYPES)}"
+        )
+
+    if target_role == "branch":
+        if not target_parent:
+            raise AcademicError("A branch campus must specify a parent.", 400)
+        if target_parent == institution.id:
+            raise AcademicError("An institution cannot be its own parent.", 400)
+        parent = db.query(Institution).filter(Institution.id == target_parent).first()
+        if not parent:
+            raise AcademicError("Parent institution not found.", 404)
+        if parent.campus_role != "main":
+            raise AcademicError("Parent must be a main campus.", 409)
+    else:  # main
+        if target_parent:
+            raise AcademicError(
+                "A main campus cannot have a parent institution.", 400,
+            )
+
+    # Branches cannot have branches
+    if institution.campus_role == "branch":
+        sub_branches = (
+            db.query(Institution)
+            .filter(Institution.parent_institution_id == institution.id)
+            .count()
+        )
+        if sub_branches > 0:
+            raise AcademicError(
+                "This institution has child branches and cannot be changed.", 409,
+            )
+
+
+def transition_institution(
+    db: Session,
+    institution_id: str,
+    actor_id: str,
+    *,
+    new_campus_role: str | None = None,
+    new_type: str | None = None,
+    new_parent_institution_id: str | None = None,
+    reason: str | None = None,
+    reference: str | None = None,
+    source_request_id: str | None = None,
+) -> tuple[Institution, InstitutionTransition]:
+    """
+    Apply a structural transition to an institution.
+
+    At least one of {new_campus_role, new_type, new_parent_institution_id}
+    must differ from the current state. The change and its history record
+    are written atomically.
+
+    Examples:
+      - Promote a branch to main: new_campus_role='main'
+      - Change type only: new_type='UNIVERSITY'
+      - Promote and change type in one action (charter award):
+          new_campus_role='main', new_type='UNIVERSITY'
+    """
+    inst = get_institution(db, institution_id)
+    _validate_transition_target(
+        db, inst, new_campus_role, new_type, new_parent_institution_id,
+    )
+
+    old_campus_role = inst.campus_role
+    old_type = inst.type
+    old_parent = inst.parent_institution_id
+
+    target_campus_role = (new_campus_role or inst.campus_role).lower()
+    target_type = (new_type or inst.type).upper()
+    target_parent = (
+        new_parent_institution_id
+        if new_campus_role is not None
+        else inst.parent_institution_id
+    )
+
+    # No-op check
+    if (
+        target_campus_role == old_campus_role
+        and target_type == old_type
+        and target_parent == old_parent
+    ):
+        raise AcademicError("No change: target state matches current state.", 409)
+
+    # Determine transition_type label
+    if old_campus_role == "branch" and target_campus_role == "main":
+        if old_type != target_type:
+            transition_type = "promote_and_change_type"
+        else:
+            transition_type = "promote_to_main"
+    elif old_type != target_type and target_campus_role == old_campus_role:
+        transition_type = "change_type"
+    elif target_parent != old_parent:
+        transition_type = "set_parent" if target_parent else "remove_parent"
+    else:
+        transition_type = "other"
+
+    # Apply the change
+    inst.campus_role = target_campus_role
+    inst.type = target_type
+    inst.parent_institution_id = target_parent
+
+    # Record immutable history
+    transition = InstitutionTransition(
+        institution_id=inst.id,
+        transition_type=transition_type,
+        old_campus_role=old_campus_role,
+        old_type=old_type,
+        old_parent_institution_id=old_parent,
+        new_campus_role=target_campus_role,
+        new_type=target_type,
+        new_parent_institution_id=target_parent,
+        reason=reason,
+        reference=reference,
+        changed_by=actor_id,
+        changed_at=_now(),
+        source_request_id=source_request_id,
+    )
+    db.add(transition)
+
+    _audit(
+        db, actor_id, "Institution", inst.id, "TRANSITION",
+        old_value=f"{old_campus_role}/{old_type}",
+        new_value=f"{target_campus_role}/{target_type}",
+        reason=reason,
+    )
+    db.commit(); db.refresh(inst); db.refresh(transition)
+    return inst, transition
+
+
+def list_institution_transitions(
+    db: Session, institution_id: str,
+) -> list[InstitutionTransition]:
+    """History of all accepted transitions for one institution, newest first."""
+    return (
+        db.query(InstitutionTransition)
+        .filter(InstitutionTransition.institution_id == institution_id)
+        .order_by(InstitutionTransition.changed_at.desc())
+        .all()
+    )
+
+
+# ============================================================================
+# INSTITUTION TRANSITION REQUESTS (Institution Admin → Regional Admin)
+# ============================================================================
+
+def request_transition(
+    db: Session,
+    institution_id: str,
+    requester_id: str,
+    *,
+    desired_campus_role: str | None = None,
+    desired_type: str | None = None,
+    desired_parent_institution_id: str | None = None,
+    reason: str,
+    reference: str | None = None,
+) -> InstitutionTransitionRequest:
+    """
+    Institution Admin submits a request for a structural transition.
+
+    Validation matches the direct-transition rules, but nothing is applied
+    until a Regional Admin reviews and approves.
+    """
+    inst = get_institution(db, institution_id)
+
+    if not reason or len(reason.strip()) < 5:
+        raise AcademicError("A reason of at least 5 characters is required.", 400)
+
+    if not any([desired_campus_role, desired_type, desired_parent_institution_id]):
+        raise AcademicError(
+            "At least one desired change must be specified.", 400,
+        )
+
+    # Pre-validate the target state (fails early if it's obviously invalid)
+    _validate_transition_target(
+        db, inst,
+        desired_campus_role, desired_type, desired_parent_institution_id,
+    )
+
+    # Reject if there's already a pending request for this institution
+    existing = (
+        db.query(InstitutionTransitionRequest)
+        .filter(
+            InstitutionTransitionRequest.institution_id == institution_id,
+            InstitutionTransitionRequest.status == "pending",
+        )
+        .first()
+    )
+    if existing:
+        raise AcademicError(
+            "A pending transition request already exists for this institution.", 409,
+        )
+
+    req = InstitutionTransitionRequest(
+        institution_id=institution_id,
+        requested_by=requester_id,
+        requested_at=_now(),
+        desired_campus_role=desired_campus_role,
+        desired_type=desired_type,
+        desired_parent_institution_id=desired_parent_institution_id,
+        reason=reason.strip(),
+        reference=reference,
+        status="pending",
+    )
+    db.add(req); db.flush()
+
+    _audit(
+        db, requester_id, "Institution", institution_id, "TRANSITION_REQUESTED",
+        new_value=f"request_id={req.id}",
+        reason=reason,
+    )
+    db.commit(); db.refresh(req)
+    return req
+
+
+def list_pending_transition_requests(
+    db: Session, institution_id: str | None = None,
+) -> list[InstitutionTransitionRequest]:
+    q = db.query(InstitutionTransitionRequest).filter(
+        InstitutionTransitionRequest.status == "pending",
+    )
+    if institution_id:
+        q = q.filter(InstitutionTransitionRequest.institution_id == institution_id)
+    return q.order_by(InstitutionTransitionRequest.requested_at.asc()).all()
+
+
+def get_transition_request(
+    db: Session, request_id: str,
+) -> InstitutionTransitionRequest:
+    req = (
+        db.query(InstitutionTransitionRequest)
+        .filter(InstitutionTransitionRequest.id == request_id)
+        .first()
+    )
+    if not req:
+        raise AcademicError("Transition request not found.", 404)
+    return req
+
+
+def approve_transition_request(
+    db: Session, request_id: str, reviewer_id: str,
+    notes: str | None = None,
+) -> tuple[Institution, InstitutionTransition, InstitutionTransitionRequest]:
+    """
+    Regional Admin approves a pending request. Applies the transition and
+    marks the request approved, all in one transaction.
+    """
+    req = get_transition_request(db, request_id)
+    if req.status != "pending":
+        raise AcademicError(f"Request is not pending (status={req.status}).", 409)
+
+    inst, transition = transition_institution(
+        db,
+        institution_id=req.institution_id,
+        actor_id=reviewer_id,
+        new_campus_role=req.desired_campus_role,
+        new_type=req.desired_type,
+        new_parent_institution_id=req.desired_parent_institution_id,
+        reason=req.reason,
+        reference=req.reference,
+        source_request_id=req.id,
+    )
+
+    req.status = "approved"
+    req.reviewed_by = reviewer_id
+    req.reviewed_at = _now()
+    req.review_notes = notes
+    db.commit(); db.refresh(req)
+
+    return inst, transition, req
+
+
+def reject_transition_request(
+    db: Session, request_id: str, reviewer_id: str,
+    notes: str | None = None,
+) -> InstitutionTransitionRequest:
+    req = get_transition_request(db, request_id)
+    if req.status != "pending":
+        raise AcademicError(f"Request is not pending (status={req.status}).", 409)
+
+    req.status = "rejected"
+    req.reviewed_by = reviewer_id
+    req.reviewed_at = _now()
+    req.review_notes = notes
+    db.commit(); db.refresh(req)
+
+    _audit(
+        db, reviewer_id, "Institution", req.institution_id, "TRANSITION_REJECTED",
+        old_value=f"request_id={req.id}",
+        reason=notes,
+    )
+    return req
+
+
+def withdraw_transition_request(
+    db: Session, request_id: str, requester_id: str,
+) -> InstitutionTransitionRequest:
+    req = get_transition_request(db, request_id)
+    if req.status != "pending":
+        raise AcademicError(f"Request is not pending (status={req.status}).", 409)
+    if req.requested_by != requester_id:
+        raise AcademicError("Only the original requester may withdraw.", 403)
+
+    req.status = "withdrawn"
+    req.reviewed_at = _now()
+    db.commit(); db.refresh(req)
+    return req
+
+
+# ============================================================================
 # SCHOOL
 # ============================================================================
 
@@ -257,7 +670,6 @@ def get_school(db: Session, school_id: str) -> School:
 
 def update_school(db: Session, school_id: str, data, user_id: str | None = None) -> School:
     school = get_school(db, school_id)
-    # If code is being changed, check uniqueness within the institution
     changes = data.model_dump(exclude_unset=True)
     new_code = changes.get("code")
     if new_code and new_code.strip().upper() != school.code:
@@ -270,8 +682,7 @@ def update_school(db: Session, school_id: str, data, user_id: str | None = None)
                 f"School code '{new_code}' already exists in this institution.", 409
             )
     _apply_update(db, school, data, protected_fields={"institution_id"})
-    _audit(db, user_id, "School", school.id, "UPDATE",
-           new_value=str(changes))
+    _audit(db, user_id, "School", school.id, "UPDATE", new_value=str(changes))
     db.commit(); db.refresh(school)
     return school
 
@@ -279,7 +690,6 @@ def update_school(db: Session, school_id: str, data, user_id: str | None = None)
 def deactivate_school(db: Session, school_id: str, reason: str | None = None,
                       user_id: str | None = None) -> School:
     school = get_school(db, school_id)
-    # Block deactivation if courses exist and are active
     active_courses = db.query(Course).filter(
         Course.school_id == school.id, Course.status == "active"
     ).count()
@@ -535,13 +945,11 @@ def update_academic_year(db: Session, ay_id: str, data,
     ay = get_academic_year(db, ay_id)
     changes = data.model_dump(exclude_unset=True)
 
-    # Temporal validation if dates being changed
     start = changes.get("start_date", ay.start_date)
     end = changes.get("end_date", ay.end_date)
     if start >= end:
         raise AcademicError("start_date must be before end_date.")
 
-    # If name changing, check uniqueness
     new_name = changes.get("name")
     if new_name and new_name != ay.name:
         exists = db.query(AcademicYear).filter(
@@ -648,7 +1056,6 @@ def update_semester(db: Session, semester_id: str, data,
     sem = get_semester(db, semester_id)
     changes = data.model_dump(exclude_unset=True)
 
-    # Temporal validation against parent academic year
     ay = get_academic_year(db, sem.academic_year_id)
     start = changes.get("start_date", sem.start_date)
     end = changes.get("end_date", sem.end_date)
@@ -657,7 +1064,6 @@ def update_semester(db: Session, semester_id: str, data,
     if start < ay.start_date or end > ay.end_date:
         raise AcademicError("Semester dates must fall within the academic year.")
 
-    # If number is changing, check uniqueness
     new_number = changes.get("number")
     if new_number and new_number != sem.number:
         exists = db.query(Semester).filter(
@@ -717,7 +1123,6 @@ def deactivate_semester(db: Session, semester_id: str, reason: str | None = None
 # ============================================================================
 
 def create_student_enrollment(db: Session, data, user_id: str | None = None) -> StudentEnrollment:
-    # Validate foreign keys
     for label, model, ident in [
         ("User", None, data.user_id),
         ("Institution", Institution, data.institution_id),
@@ -733,7 +1138,6 @@ def create_student_enrollment(db: Session, data, user_id: str | None = None) -> 
             if not db.query(model).filter(model.id == ident).first():
                 raise AcademicError(f"{label} not found.", 404)
 
-    # Consistency: the course must belong to the institution
     course = db.query(Course).filter(Course.id == data.course_id).first()
     school = db.query(School).filter(School.id == course.school_id).first()
     if school.institution_id != data.institution_id:
@@ -741,7 +1145,6 @@ def create_student_enrollment(db: Session, data, user_id: str | None = None) -> 
             "Course does not belong to the specified institution.", 409
         )
 
-    # Consistency: the semester must belong to the academic year
     semester = db.query(Semester).filter(Semester.id == data.semester_id).first()
     if semester.academic_year_id != data.academic_year_id:
         raise AcademicError(

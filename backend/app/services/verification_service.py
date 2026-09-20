@@ -2,13 +2,17 @@
 Email + phone verification and password reset services.
 
 Two flows:
-  1. Registration   -> data lives in cache, promoted to `users` on verify
+  1. Registration -> data lives in cache, promoted to `users` on verify
   2. Other purposes -> existing users, DB-backed verification
 
 Bootstrap admin elevation:
   Emails listed in BOOTSTRAP_ADMIN_EMAILS are elevated to Super Admin
   automatically when they complete email verification during normal
   registration. The elevation is one-time (sticky flag).
+
+Lecturer affiliations:
+  On promotion of a lecturer, a LecturerAffiliation row is created from the
+  referee data captured in the cache record.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -26,6 +30,7 @@ from app.core.security import (
 from app.models.user import User
 from app.models.external_profile import ExternalProfile
 from app.models.role import Role, UserRole
+from app.models.lecturer_affiliation import LecturerAffiliation
 from app.models.auth_extension import (
     EmailVerification, PhoneVerification, PasswordReset, Session as SessionModel,
 )
@@ -67,7 +72,6 @@ def _try_bootstrap_admin_elevation(db: Session, user: User) -> bool:
         return False
 
     if user.is_bootstrap_admin:
-        # Already elevated. Nothing to do.
         return False
 
     super_role = db.query(Role).filter(Role.code == "super_admin").first()
@@ -82,7 +86,6 @@ def _try_bootstrap_admin_elevation(db: Session, user: User) -> bool:
     user.user_type = "admin"
     user.is_bootstrap_admin = True
 
-    # Grant the Super Admin role at platform scope, active immediately.
     db.add(UserRole(
         user_id=user.id,
         role_id=super_role.id,
@@ -208,13 +211,10 @@ def verify_pending_registration(db: Session, email: str, otp: str) -> User:
     db.add(user)
     db.flush()
 
-    # ── Bootstrap admin elevation ────────────────────────────────
-    # If the email is in the allowlist and not yet claimed, elevate to
-    # Super Admin. This bypasses the normal "student" role assignment
-    # below because the user is now an admin, not a student.
+    # --- Bootstrap admin elevation ---
     is_bootstrap_elevated = _try_bootstrap_admin_elevation(db, user)
 
-    # ── Base role assignment (skipped for bootstrap admins) ──────
+    # --- Base role assignment (skipped for bootstrap admins) ---
     if not is_bootstrap_elevated:
         role_code_map = {
             "student": "student",
@@ -234,7 +234,7 @@ def verify_pending_registration(db: Session, email: str, otp: str) -> User:
                     notes=f"Auto-assigned on {user.user_type} registration",
                 ))
 
-    # ── External profile (only for external users) ───────────────
+    # --- External profile (only for external users) ---
     if user.user_type == "external" and external_subtype:
         profile = ExternalProfile(
             user_id=user.id,
@@ -246,6 +246,25 @@ def verify_pending_registration(db: Session, email: str, otp: str) -> User:
             if hasattr(profile, k):
                 setattr(profile, k, v)
         db.add(profile)
+
+    # --- Lecturer affiliation (only for lecturers) ---
+    # The first affiliation is created from the cached referee + institution
+    # data. Additional affiliations are added later via POST /lecturers/me/affiliations.
+    if user.user_type == "lecturer":
+        extra = record.get("extra") or {}
+        if extra.get("referee_name") and user.institution_id:
+            db.add(LecturerAffiliation(
+                user_id=user.id,
+                institution_id=user.institution_id,
+                institutional_email=user.institutional_email,
+                department=user.department,
+                title=user.title or "Lecturer",
+                referee_name=extra["referee_name"],
+                referee_phone=extra["referee_phone"],
+                referee_relationship=extra["referee_relationship"],
+                verification_status="pending",
+                domain_verified=user.domain_verified,
+            ))
 
     db.commit()
     db.refresh(user)

@@ -1,5 +1,13 @@
 """
 Pydantic schemas for academic structure.
+
+Module 002 additions:
+  - InstitutionCreate gains campus_role (required)
+  - InstitutionUpdate does NOT expose campus_role / parent / type
+    (those go through the transition flow)
+  - New transition schemas: InstitutionTransitionResponse
+  - New request schemas: InstitutionTransitionRequestCreate / Response
+  - MainCampusOption for the branch creation dropdown
 """
 from datetime import date, datetime
 from pydantic import BaseModel, ConfigDict, Field
@@ -44,12 +52,29 @@ class CountyResponse(BaseModel):
 # ============================================================================
 
 class InstitutionCreate(BaseModel):
+    """
+    campus_role is required:
+      - 'main'   → standalone campus; parent_institution_id must be null
+      - 'branch' → must supply parent_institution_id pointing at a main campus
+    """
     name: str = Field(..., min_length=2, max_length=200)
     short_name: str | None = Field(None, max_length=50)
     code: str = Field(..., min_length=2, max_length=32)
-    type: str = Field(..., description="UNIVERSITY|COLLEGE|TVET|POLYTECHNIC|KMTC|OTHER")
+    type: str = Field(
+        ...,
+        description=(
+            "UNIVERSITY|UNIVERSITY_COLLEGE|COLLEGE|POLYTECHNIC|"
+            "TVET|TECHNICAL_INSTITUTE|KMTC|TTC|OTHER"
+        ),
+    )
+    campus_role: str = Field(
+        ..., description="main | branch",
+    )
     county_id: str
-    parent_institution_id: str | None = None
+    parent_institution_id: str | None = Field(
+        None,
+        description="Required if campus_role='branch'; must be null otherwise.",
+    )
     physical_address: str | None = None
     email: str | None = None
     phone: str | None = None
@@ -57,9 +82,13 @@ class InstitutionCreate(BaseModel):
 
 
 class InstitutionUpdate(BaseModel):
+    """
+    Structural fields (campus_role, parent_institution_id, type, code,
+    county_id) are intentionally NOT exposed here. Use the transition
+    endpoints for those.
+    """
     name: str | None = Field(None, min_length=2, max_length=200)
     short_name: str | None = None
-    type: str | None = None
     physical_address: str | None = None
     email: str | None = None
     phone: str | None = None
@@ -75,6 +104,7 @@ class InstitutionResponse(BaseModel):
     short_name: str | None
     code: str
     type: str
+    campus_role: str
     county_id: str
     parent_institution_id: str | None
     physical_address: str | None
@@ -84,6 +114,95 @@ class InstitutionResponse(BaseModel):
     logo_url: str | None
     status: str
     created_at: datetime
+
+
+class MainCampusOption(BaseModel):
+    """Compact shape used to populate the 'parent main campus' dropdown."""
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    code: str
+    name: str
+    type: str
+    county_id: str
+
+
+# ============================================================================
+# INSTITUTION TRANSITIONS
+# ============================================================================
+
+class InstitutionTransitionCreate(BaseModel):
+    """
+    Regional Admin / Super Admin applies a transition directly.
+    At least one of the three target fields must differ from current state.
+    """
+    new_campus_role: str | None = Field(
+        None, description="main | branch",
+    )
+    new_type: str | None = Field(
+        None,
+        description=(
+            "UNIVERSITY|UNIVERSITY_COLLEGE|COLLEGE|POLYTECHNIC|"
+            "TVET|TECHNICAL_INSTITUTE|KMTC|TTC|OTHER"
+        ),
+    )
+    new_parent_institution_id: str | None = Field(
+        None, description="Required if new_campus_role='branch'.",
+    )
+    reason: str | None = Field(None, max_length=2000)
+    reference: str | None = Field(None, max_length=255)
+
+
+class InstitutionTransitionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    institution_id: str
+    transition_type: str
+    old_campus_role: str | None
+    old_type: str | None
+    old_parent_institution_id: str | None
+    new_campus_role: str | None
+    new_type: str | None
+    new_parent_institution_id: str | None
+    reason: str | None
+    reference: str | None
+    changed_by: str | None
+    changed_at: datetime
+    source_request_id: str | None
+
+
+# ============================================================================
+# INSTITUTION TRANSITION REQUESTS
+# ============================================================================
+
+class InstitutionTransitionRequestCreate(BaseModel):
+    """Institution Admin submits a request for Regional Admin review."""
+    desired_campus_role: str | None = Field(None, description="main | branch")
+    desired_type: str | None = None
+    desired_parent_institution_id: str | None = None
+    reason: str = Field(..., min_length=5, max_length=2000)
+    reference: str | None = Field(None, max_length=255)
+
+
+class InstitutionTransitionRequestResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: str
+    institution_id: str
+    requested_by: str
+    requested_at: datetime
+    desired_campus_role: str | None
+    desired_type: str | None
+    desired_parent_institution_id: str | None
+    reason: str
+    reference: str | None
+    status: str
+    reviewed_by: str | None
+    reviewed_at: datetime | None
+    review_notes: str | None
+    created_at: datetime
+
+
+class TransitionReviewRequest(BaseModel):
+    notes: str | None = Field(None, max_length=2000)
 
 
 # ============================================================================
