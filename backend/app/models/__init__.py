@@ -13,6 +13,29 @@ from app.models.group import (
     GroupActivity, GroupAnnouncement,
     GroupTimetable, GroupTimetableEntry, GroupTimetableApproval,
 )
+# Module 012 — Financial
+from app.models.financial import (
+    Subscription, Transaction, Invoice, Receipt, RefundRequest,
+    EventAdvertisement, ReconciliationBatch, FinancialAuditLog,
+    FinancialNotification,
+)
+# Module 003 Phase 10 — Activity Clubs
+from app.models.activity_club import (
+    ActivityClub, ActivityClubMembership,
+    ActivityClubPosition, ActivityClubMilestone,
+    ActivityClubMilestoneReport,
+    ActivityClubElectionCycle, ActivityClubElectionCandidate,
+    ActivityClubElectionVote,
+    ActivityClubPositionApprovalVote, ActivityClubPositionApprovalBallot,
+    ActivityClubDissolutionEvent, ActivityClubRevivalPetition,
+    ActivityClubApprovalEvent,
+)
+# Module 003 Phase 9 — Impeachment
+from app.models.impeachment import (
+    ImpeachmentCase, ImpeachmentPetition,
+    ImpeachmentSession, ImpeachmentVote,
+)
+
 from app.models.group_subscription import GroupSubscription
 from app.models.group_unit import GroupUnit, GroupUnitConfirmation
 from app.models.group_join_request import GroupJoinRequest
@@ -97,8 +120,23 @@ __all__ = [
     "ElectionTriggerEvent",
     # Phase 8
     "GroupTransfer",
+    "ImpeachmentCase", "ImpeachmentPetition",
+    "ImpeachmentSession", "ImpeachmentVote",
     # Phase 11
     "Community", "CommunityMembership", "CommunityMessage",
     "CommunityMessageReport", "CommunityModerationAction",
     "SoloSubscription", "SoloLearningSession",
+    # Phase 10
+    "ActivityClub", "ActivityClubMembership",
+    "ActivityClubPosition", "ActivityClubMilestone",
+    "ActivityClubMilestoneReport",
+    "ActivityClubElectionCycle", "ActivityClubElectionCandidate",
+    "ActivityClubElectionVote",
+    "ActivityClubPositionApprovalVote", "ActivityClubPositionApprovalBallot",
+    "ActivityClubDissolutionEvent", "ActivityClubRevivalPetition",
+    "ActivityClubApprovalEvent",
+    # Module 012
+    "Subscription", "Transaction", "Invoice", "Receipt", "RefundRequest",
+    "EventAdvertisement", "ReconciliationBatch", "FinancialAuditLog",
+    "FinancialNotification",
 ]

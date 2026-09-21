@@ -4,6 +4,11 @@ User model — Module 001: Identity & Authentication.
 Module 002 completion addition:
   - registration_number : optional per-institution student registration
     number, used by the pair-based verification system.
+
+Module 012 addition:
+  - timezone : IANA timezone string (default Africa/Nairobi). Used by the
+    financial notification scheduler to deliver messages at the user's
+    local hour, respecting a 21:00–07:00 sleep window.
 """
 from datetime import datetime
 
@@ -26,6 +31,15 @@ class User(Base, UUIDMixin, TimestampMixin):
     )
     phone: Mapped[str | None] = mapped_column(
         String(20), unique=True, nullable=True
+    )
+
+    # --- Locale (Module 012) ---
+    # IANA timezone (e.g. "Africa/Nairobi", "America/New_York"). Used by
+    # the financial notification scheduler to compute delivery time in
+    # the user's local clock. Defaults to Kenya.
+    timezone: Mapped[str] = mapped_column(
+        String(64), nullable=False, default="Africa/Nairobi",
+        server_default="Africa/Nairobi",
     )
 
     # --- Authentication ---

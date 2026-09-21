@@ -6,6 +6,10 @@ from app.api import (
     election,
     community, group_transfer, cascade,
     solo_learner,
+    impeachment,
+    activity_club,
+    financial,
+    webhooks,
 )
 from app.core.config import settings
 
@@ -37,6 +41,12 @@ app.include_router(community.router)
 app.include_router(group_transfer.router)
 app.include_router(cascade.router)
 app.include_router(solo_learner.router)
+app.include_router(impeachment.router)
+app.include_router(activity_club.router)
+
+# Module 012
+app.include_router(financial.router)
+app.include_router(webhooks.router)
 
 
 @app.get("/health", tags=["Health"])
