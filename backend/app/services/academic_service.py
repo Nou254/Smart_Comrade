@@ -19,6 +19,14 @@ from app.models.academic import (
     InstitutionTransition, InstitutionTransitionRequest,
 )
 
+# Module 003 Phase 11 + Phase 7 — integration hookups
+from app.services.community_service import (
+    ensure_user_memberships_for_enrollment as _ensure_community_memberships,
+)
+from app.services.cascade_trigger_service import (
+    on_institution_created as _on_institution_created,
+)
+
 
 VALID_INSTITUTION_TYPES = {
     "UNIVERSITY", "UNIVERSITY_COLLEGE", "COLLEGE",
@@ -169,7 +177,15 @@ def create_institution(db: Session, data, user_id: str | None = None) -> Institu
     db.add(inst); db.flush()
     _audit(db, user_id, "Institution", inst.id, "CREATE",
            new_value=f"{inst.name} ({campus_role})")
-    db.commit(); db.refresh(inst)
+    db.commit()
+    db.refresh(inst)
+
+    # Module 003 Phase 7 — cascade trigger: new institution may complete county
+    try:
+        _on_institution_created(db, county_id=inst.county_id)
+    except Exception:
+        pass
+
     return inst
 
 
@@ -1173,7 +1189,26 @@ def create_student_enrollment(db: Session, data, user_id: str | None = None) -> 
     db.add(enroll); db.flush()
     _audit(db, user_id, "StudentEnrollment", enroll.id, "CREATE",
            new_value=f"user={data.user_id} course={data.course_id}")
-    db.commit(); db.refresh(enroll)
+    db.commit()
+    db.refresh(enroll)
+
+    # Module 003 Phase 11 — auto-join communities
+    try:
+        _ensure_community_memberships(
+            db,
+            user_id=enroll.user_id,
+            institution_id=enroll.institution_id,
+            school_id=db.query(Course).filter(Course.id == enroll.course_id).first().school_id,
+            course_id=enroll.course_id,
+            year_level=1,  # will refine later when we have the student's year
+            academic_year_id=enroll.academic_year_id,
+            combination_id=enroll.combination_id,
+        )
+        db.commit()
+    except Exception:
+        # Never let community sync break registration
+        db.rollback()
+
     return enroll
 
 

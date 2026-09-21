@@ -47,6 +47,14 @@ from app.services.group_subscription_service import (
     refresh_member_count,
 )
 
+# Module 003 Phase 11 + Phase 7 — integration hookups
+from app.services.community_service import (
+    ensure_user_memberships_for_enrollment as _ensure_community_memberships,
+)
+from app.services.cascade_trigger_service import (
+    on_group_threshold_reached as _on_group_threshold_reached,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -733,6 +741,29 @@ def approve_join_request(
             "election_triggered": triggered,
         },
     )
+
+    # Module 003 Phase 11 — auto-join the approved member to communities
+    try:
+        _ensure_community_memberships(
+            db,
+            user_id=request.user_id,
+            institution_id=group.institution_id,
+            school_id=group.school_id,
+            course_id=group.course_id,
+            year_level=group.year_level or 1,
+            academic_year_id=group.academic_year_id,
+            combination_id=group.combination_id,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+
+    # Module 003 Phase 7 — cascade trigger: group threshold may complete school
+    if triggered:
+        try:
+            _on_group_threshold_reached(db, group.id)
+        except Exception:
+            pass
 
     return {
         "request_id": request.id,

@@ -9,10 +9,20 @@ Module 002 completion additions:
   - StudentEnrollment.combination_id (nullable FK to combinations)
   - UnitMembership.confirmation_status / confirmed_at / declined_at /
     decline_reason (drives the "joiner confirms each unit" flow)
+
+Module 003 Phase 6 additions:
+  - Institution.under_regional_admin (no-payer fallback)
+  - County.under_regional_admin
+
+Module 003 Phase 7 additions:
+  - School.compliant_group_count + election_triggered_at
+  - Institution.represented_school_count + election_triggered_at + buffer_ends_at
+  - County.represented_institution_count + election_triggered_at
 """
 from datetime import date, datetime
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -60,6 +70,19 @@ class County(Base, UUIDMixin, TimestampMixin):
     )
     code: Mapped[str] = mapped_column(String(16), unique=True, index=True, nullable=False)
     name: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    # --- Module 003 Phase 6 — no-payer fallback ---
+    under_regional_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True,
+    )
+
+    # --- Module 003 Phase 7 — election cascade cache ---
+    represented_institution_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, index=True,
+    )
+    election_triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     region: Mapped[Region] = relationship("Region", back_populates="counties")
     institutions: Mapped[list["Institution"]] = relationship(
@@ -129,6 +152,22 @@ class Institution(Base, UUIDMixin, TimestampMixin):
     logo_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
     status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+
+    # --- Module 003 Phase 6 — no-payer fallback ---
+    under_regional_admin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, index=True,
+    )
+
+    # --- Module 003 Phase 7 — election cascade cache ---
+    represented_school_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, index=True,
+    )
+    election_triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
+    buffer_ends_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     county: Mapped[County] = relationship("County", back_populates="institutions")
     parent: Mapped["Institution | None"] = relationship(
@@ -278,6 +317,14 @@ class School(Base, UUIDMixin, TimestampMixin):
     code: Mapped[str] = mapped_column(String(32), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+
+    # --- Module 003 Phase 7 — election cascade cache ---
+    compliant_group_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, index=True,
+    )
+    election_triggered_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+    )
 
     institution: Mapped[Institution] = relationship("Institution", back_populates="schools")
     courses: Mapped[list["Course"]] = relationship(

@@ -24,6 +24,13 @@ from app.services.election_lifecycle_service import (
     ElectionError, GROUP, SCHOOL, INSTITUTION, COUNTY, LEVELS_WITH_APPEALS,
 )
 
+# Module 003 Phase 7 — integration hookups
+from app.services.cascade_trigger_service import (
+    on_school_election_completed as _on_school_election_completed,
+    on_institution_election_completed as _on_institution_election_completed,
+    process_queued_triggers as _process_queued_triggers,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -494,6 +501,19 @@ def declare_winner_and_provision(
     _log_audit(db, election.id, "election.roles_provisioned", actor_id,
                details={"provisioned": provisioned})
     db.commit()
+
+    # Module 003 Phase 7 — cascade triggers after completion
+    try:
+        if election.level == SCHOOL:
+            _on_school_election_completed(db, election.constituency_id)
+        elif election.level == INSTITUTION:
+            _on_institution_election_completed(db, election.constituency_id)
+
+        # Retry anything queued behind this election
+        _process_queued_triggers(db, election.id)
+    except Exception:
+        pass
+
     return {"state": election.state, "provisioned": provisioned}
 
 

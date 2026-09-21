@@ -16,6 +16,7 @@ from app.models.group import (
 from app.models.group_subscription import GroupSubscription
 from app.models.group_unit import GroupUnit, GroupUnitConfirmation
 from app.models.group_join_request import GroupJoinRequest
+from app.models.solo_learner import SoloSubscription, SoloLearningSession
 
 from app.models.auth_extension import (
     EmailVerification, PhoneVerification, PasswordReset, Session, BackupCode,
@@ -47,19 +48,22 @@ from app.models.registration_verification import (
 
 # Module 003 Phase 6 — Elections
 from app.models.election import (
-    Election,
-    ElectionPosition,
-    ElectionTicket,
-    ElectionCandidate,
-    ElectionVoterRoll,
-    ElectionApprovalVote,
-    ElectionBallot,
-    ElectionResult,
-    ElectionDispute,
-    ElectionAppeal,
-    ElectionReschedule,
-    ElectionNoPayerEvent,
-    ElectionAuditEvent,
+    Election, ElectionPosition, ElectionTicket, ElectionCandidate,
+    ElectionVoterRoll, ElectionApprovalVote, ElectionBallot,
+    ElectionResult, ElectionDispute, ElectionAppeal, ElectionReschedule,
+    ElectionNoPayerEvent, ElectionAuditEvent,
+)
+
+# Module 003 Phase 7 — Cascade trigger events
+from app.models.election_trigger_event import ElectionTriggerEvent
+
+# Module 003 Phase 8 — Transfers
+from app.models.group_transfer import GroupTransfer
+
+# Module 003 Phase 11 — Communities
+from app.models.community import (
+    Community, CommunityMembership, CommunityMessage,
+    CommunityMessageReport, CommunityModerationAction,
 )
 
 
@@ -74,30 +78,27 @@ __all__ = [
     "GroupMeeting", "GroupMeetingAttendee",
     "GroupActivity", "GroupAnnouncement",
     "GroupTimetable", "GroupTimetableEntry", "GroupTimetableApproval",
-    "GroupSubscription",
-    "GroupUnit", "GroupUnitConfirmation",
+    "GroupSubscription", "GroupUnit", "GroupUnitConfirmation",
     "GroupJoinRequest",
     "EmailVerification", "PhoneVerification", "PasswordReset", "Session", "BackupCode",
     "AuthAuditLog", "TwoFactorChallenge",
     "AdminActionLog", "SystemConfig", "AdminInvitation",
     "TimetableUpload", "UploadFile", "UploadScannedPage", "ExtractedUnit",
     "ExternalProfile", "NotificationPreference",
-    "Combination",
-    "UnitOffering",
+    "Combination", "UnitOffering",
     "UnitProposal", "UnitProposalItem", "UnitProposalEvent",
     "InstitutionVerificationPeriod", "InstitutionRegistrationNumber",
-    # Module 003 Phase 6
-    "Election",
-    "ElectionPosition",
-    "ElectionTicket",
-    "ElectionCandidate",
-    "ElectionVoterRoll",
-    "ElectionApprovalVote",
-    "ElectionBallot",
-    "ElectionResult",
-    "ElectionDispute",
-    "ElectionAppeal",
-    "ElectionReschedule",
-    "ElectionNoPayerEvent",
-    "ElectionAuditEvent",
+    # Phase 6
+    "Election", "ElectionPosition", "ElectionTicket", "ElectionCandidate",
+    "ElectionVoterRoll", "ElectionApprovalVote", "ElectionBallot",
+    "ElectionResult", "ElectionDispute", "ElectionAppeal",
+    "ElectionReschedule", "ElectionNoPayerEvent", "ElectionAuditEvent",
+    # Phase 7
+    "ElectionTriggerEvent",
+    # Phase 8
+    "GroupTransfer",
+    # Phase 11
+    "Community", "CommunityMembership", "CommunityMessage",
+    "CommunityMessageReport", "CommunityModerationAction",
+    "SoloSubscription", "SoloLearningSession",
 ]
