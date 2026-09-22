@@ -35,7 +35,20 @@ from app.models.impeachment import (
     ImpeachmentCase, ImpeachmentPetition,
     ImpeachmentSession, ImpeachmentVote,
 )
-
+# Module 004 — Unit Representation
+from app.models.unit_representation import (
+    UnitRepresentative,
+    UnitNetwork,
+    UnitNetworkMember,
+    UnitCoordinationMessage,
+    UnitDiscussion,
+    UnitAnnouncement,
+    UnitIssue,
+    UnitIssueEscalation,
+    UnitQuestion,
+    UnitQuestionResponse,
+    UnitSharedResource,
+)
 from app.models.group_subscription import GroupSubscription
 from app.models.group_unit import GroupUnit, GroupUnitConfirmation
 from app.models.group_join_request import GroupJoinRequest
@@ -139,4 +152,9 @@ __all__ = [
     "Subscription", "Transaction", "Invoice", "Receipt", "RefundRequest",
     "EventAdvertisement", "ReconciliationBatch", "FinancialAuditLog",
     "FinancialNotification",
+    # Module 004
+    "UnitRepresentative", "UnitNetwork", "UnitNetworkMember",
+    "UnitCoordinationMessage", "UnitDiscussion", "UnitAnnouncement",
+    "UnitIssue", "UnitIssueEscalation",
+    "UnitQuestion", "UnitQuestionResponse", "UnitSharedResource",
 ]

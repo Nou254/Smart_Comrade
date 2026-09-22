@@ -10,6 +10,7 @@ from app.api import (
     activity_club,
     financial,
     webhooks,
+    unit_representation,
 )
 from app.core.config import settings
 
@@ -43,6 +44,9 @@ app.include_router(cascade.router)
 app.include_router(solo_learner.router)
 app.include_router(impeachment.router)
 app.include_router(activity_club.router)
+
+# Module 004
+app.include_router(unit_representation.router)
 
 # Module 012
 app.include_router(financial.router)
