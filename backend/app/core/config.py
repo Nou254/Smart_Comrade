@@ -108,6 +108,45 @@ class Settings(BaseSettings):
     TESSERACT_CMD: str | None = None        # e.g. "C:\\Program Files\\Tesseract-OCR\\tesseract.exe"
 
     # ─────────────────────────────────────────────────────────────────
+    # AI assistance (Module 005) — OpenAI-compatible chat completions
+    # ─────────────────────────────────────────────────────────────────
+    # Every AI call in the platform goes through one HTTP client that
+    # speaks the OpenAI /chat/completions protocol. Point AI_API_BASE at
+    # Groq, OpenAI, or any compatible gateway.
+    AI_ENABLED: bool = True
+    AI_API_BASE: str = "https://api.groq.com/openai/v1"
+    AI_API_KEY: str | None = None
+    AI_MODEL_CHEAP: str = "llama-3.1-8b-instant"
+    AI_MODEL_MID: str = "llama-3.3-70b-versatile"
+    AI_MODEL_PREMIUM: str = "llama-3.3-70b-versatile"
+    AI_TIMEOUT_SECONDS: float = 30.0
+    AI_MAX_TOKENS: int = 1024
+    # Minimum relevance confidence for a shared resource to auto-publish.
+    AI_RESOURCE_MIN_CONFIDENCE: float = 0.6
+
+    # ─────────────────────────────────────────────────────────────────
+    # Payments — M-Pesa (Safaricom Daraja)
+    # ─────────────────────────────────────────────────────────────────
+    MPESA_CONSUMER_KEY: str | None = None
+    MPESA_CONSUMER_SECRET: str | None = None
+    MPESA_SHORTCODE: str | None = None
+    MPESA_PASSKEY: str | None = None
+    MPESA_ENVIRONMENT: str = "sandbox"          # sandbox | production
+    MPESA_CALLBACK_URL: str = ""
+    MPESA_TRANSACTION_TYPE: str = "CustomerPayBillOnline"
+    # Refunds/reversals need an initiator and an RSA-encrypted credential.
+    MPESA_INITIATOR_NAME: str | None = None
+    MPESA_SECURITY_CREDENTIAL: str | None = None
+
+    # ─────────────────────────────────────────────────────────────────
+    # Payments — card / bank gateway
+    # ─────────────────────────────────────────────────────────────────
+    PAYMENT_GATEWAY_BASE_URL: str | None = None
+    PAYMENT_GATEWAY_API_KEY: str | None = None
+    # Shared secret used to HMAC-verify inbound provider webhooks.
+    PAYMENT_WEBHOOK_SECRET: str = "dev_webhook_secret"
+
+    # ─────────────────────────────────────────────────────────────────
     # Bootstrap admins
     # ─────────────────────────────────────────────────────────────────
     # Comma-separated list of emails. When a user with one of these

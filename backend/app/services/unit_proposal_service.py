@@ -140,19 +140,52 @@ def _notify_approver_and_assistant(
     db: Session, proposal: UnitProposal, role_code: str, assistant_role_code: str | None = None,
 ) -> None:
     """
-    Notification stub. Real dispatch will be wired through the notification
-    service. Notifies both the principal and (in parallel) the assistant
-    where an assistant role exists for that stage.
+    Notify the principal approver for this stage and, in parallel, the
+    assistant role where one exists. Pins the proposal to a concrete
+    approver so it can be filtered out of that user's inbox.
     """
-    logger.info(
-        "[unit_proposal.notify] proposal=%s stage_role=%s assistant_role=%s "
-        "approver_user=%s deadline=%s",
-        proposal.id,
-        role_code,
-        assistant_role_code,
-        proposal.current_approver_id,
-        proposal.escalation_deadline.isoformat() if proposal.escalation_deadline else None,
+    from app.services.notification_service import (
+        notify_user, users_with_roles,
     )
+
+    role_codes: list[str] = [role_code]
+    if assistant_role_code:
+        role_codes.append(assistant_role_code)
+    recipients = users_with_roles(db, tuple(role_codes))
+
+    principal_ids = users_with_roles(db, (role_code,))
+    if principal_ids and proposal.current_approver_id not in principal_ids:
+        proposal.current_approver_id = principal_ids[0]
+
+    deadline = (
+        proposal.escalation_deadline.isoformat()
+        if proposal.escalation_deadline else "n/a"
+    )
+    subject = "Unit proposal awaiting your review"
+    body = (
+        f"Unit proposal {proposal.id} is at stage '{role_code}'"
+        + (f" (assistant: {assistant_role_code})" if assistant_role_code else "")
+        + f". Escalation deadline: {deadline}."
+    )
+
+    for uid in recipients:
+        notify_user(
+            db,
+            user_id=uid,
+            subject=subject,
+            text_body=body,
+            html_body=f"<p>{body}</p>",
+            event_key="unit.proposal.pending",
+            source_type="unit_proposal",
+            source_id=proposal.id,
+        )
+
+    try:
+        db.commit()
+    except Exception:
+        logger.exception(
+            "[unit_proposal.notify] commit failed for %s", proposal.id,
+        )
 
 
 _ASSISTANT_FOR: dict[str, str] = {

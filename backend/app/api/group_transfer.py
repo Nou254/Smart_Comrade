@@ -100,20 +100,37 @@ def get_one_transfer(
 def post_transfer_fee(
     transfer_id: str,
     payload: GroupTransferFeeRecord,
+    provider: str = Query(
+        "mpesa", description="Payment provider that took the transfer fee.",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Record a nomination fee payment. Stub until M-Pesa webhook integration
-    lands — in production this only succeeds when a verified webhook arrives.
+    Record a transfer fee payment after the provider confirms it.
+
+    The fee is only recorded once the payment provider verifies that the
+    supplied reference is a successful payment for the correct amount.
     """
+    from app.services.fee_service import (
+        FeeError, transfer_fee_amount, verify_payment_reference,
+    )
     try:
+        transfer = get_transfer(db, transfer_id)
+        if not transfer.fee_paid:
+            verify_payment_reference(
+                provider_name=provider,
+                reference=payload.payment_reference,
+                amount=transfer_fee_amount(
+                    getattr(transfer, "transfer_type", "ordinary"),
+                ),
+            )
         result = record_fee(
             db, transfer_id,
             payment_reference=payload.payment_reference,
             admin_id=current_user.id,
         )
-    except TransferError as e:
+    except (TransferError, FeeError) as e:
         _err(e)
     log_admin_action(
         db, actor_id=current_user.id, action="group_transfer.fee_recorded",

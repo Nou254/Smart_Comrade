@@ -7,6 +7,7 @@ from app.models.academic import (
     AcademicStructureAudit,
     InstitutionTransition, InstitutionTransitionRequest,
 )
+
 from app.models.group import (
     Group, GroupMembership, GroupOfficial,
     GroupMeeting, GroupMeetingAttendee,
@@ -48,6 +49,22 @@ from app.models.unit_representation import (
     UnitQuestion,
     UnitQuestionResponse,
     UnitSharedResource,
+)
+# Module 005 — Assessment
+from app.models.assessment import (
+    Assessment,
+    QuestionBank,
+    Question,
+    Attempt,
+    Response as AssessmentResponseModel,
+    Submission,
+    Result,
+    Feedback,
+    Appeal,
+    AssessmentAuditLog,
+    AssessmentAudienceSnapshot,
+    AssessmentCatalogEntry,
+    AIAssistanceLog,
 )
 from app.models.group_subscription import GroupSubscription
 from app.models.group_unit import GroupUnit, GroupUnitConfirmation
@@ -100,6 +117,30 @@ from app.models.group_transfer import GroupTransfer
 from app.models.community import (
     Community, CommunityMembership, CommunityMessage,
     CommunityMessageReport, CommunityModerationAction,
+)
+
+# ============================================================================
+# Communication module — new
+# ============================================================================
+from app.models.messaging import (
+    ConversationRequest,
+    DirectConversation,
+    DirectConversationParticipant,
+    DirectMessage,
+    UserBlock,
+)
+from app.models.announcement import (
+    OfficialAnnouncement,
+    OfficialAnnouncementAudience,
+)
+from app.models.notification import Notification
+from app.models.file_share import SharedFile
+from app.models.forum import (
+    Forum,
+    ForumApprovalRequest,
+    ForumJoin,
+    ForumTopic,
+    ForumReply,
 )
 
 
@@ -157,4 +198,17 @@ __all__ = [
     "UnitCoordinationMessage", "UnitDiscussion", "UnitAnnouncement",
     "UnitIssue", "UnitIssueEscalation",
     "UnitQuestion", "UnitQuestionResponse", "UnitSharedResource",
+    # Module 005
+    "Assessment", "QuestionBank", "Question", "Attempt",
+    "AssessmentResponseModel", "Submission", "Result", "Feedback",
+    "Appeal", "AssessmentAuditLog", "AssessmentAudienceSnapshot",
+    "AssessmentCatalogEntry", "AIAssistanceLog",
+    # Communication module
+    "ConversationRequest", "DirectConversation",
+    "DirectConversationParticipant", "DirectMessage", "UserBlock",
+    "OfficialAnnouncement", "OfficialAnnouncementAudience",
+    "Notification",
+    "SharedFile",
+    "Forum", "ForumApprovalRequest", "ForumJoin",
+    "ForumTopic", "ForumReply",
 ]

@@ -51,7 +51,19 @@ def start_batch(
     db.add(batch)
     db.flush()
 
-    _compare(db, batch)
+    try:
+        _compare(db, batch)
+    except ReconciliationError as e:
+        batch.status = "failed"
+        batch.completed_at = _now()
+        batch.notes = (
+            f"{batch.notes} | {e.message}" if batch.notes else e.message
+        )
+        _log(db, batch.id, "reconciliation.failed", run_by,
+             details={"error": e.message})
+        db.commit()
+        raise
+
     batch.completed_at = _now()
     batch.status = "completed"
     _log(db, batch.id, "reconciliation.completed", run_by,
@@ -72,9 +84,20 @@ def start_batch(
 
 def _compare(db: Session, batch: ReconciliationBatch) -> None:
     """
-    Stub comparison. Real implementation would call provider.transaction_list()
-    and compare to our local records.
+    Match our local ledger against the provider's view of the period.
+
+    Preferred path is a provider ledger listing. Providers that only offer
+    per-reference lookups (M-Pesa) fall back to verifying each transaction
+    individually with `verify_payment()`.
+
+    Raises ReconciliationError if the provider could not be reached for any
+    transaction, so the batch is recorded as failed rather than silently
+    reporting a clean match.
     """
+    from app.services.payment_provider_service import (
+        get_provider, PaymentProviderError,
+    )
+
     our_txns = db.query(Transaction).filter(
         Transaction.provider == batch.provider,
         Transaction.initiated_at >= batch.period_start,
@@ -83,21 +106,91 @@ def _compare(db: Session, batch: ReconciliationBatch) -> None:
 
     batch.total_transactions = len(our_txns)
 
+    provider = get_provider(batch.provider)
+
+    provider_rows = None
+    try:
+        provider_rows = provider.transaction_list(
+            period_start=batch.period_start,
+            period_end=batch.period_end,
+        )
+    except PaymentProviderError as e:
+        logger.info(
+            "[reconciliation] %s has no ledger listing (%s); verifying "
+            "per reference instead",
+            batch.provider, e.message,
+        )
+
     matched = 0
     missing = 0
     mismatched = 0
-    for t in our_txns:
-        if t.status in (TXN_SUCCESSFUL, TXN_SETTLED):
-            matched += 1
-        elif t.status in (TXN_FAILED, TXN_PENDING_PROVIDER):
-            missing += 1
+    unclaimed = 0
+
+    if provider_rows is not None:
+        by_reference = {
+            r.reference: r for r in provider_rows if r.reference
+        }
+        by_provider_reference = {
+            r.provider_reference: r for r in provider_rows if r.provider_reference
+        }
+        used: set[int] = set()
+
+        for t in our_txns:
+            row = by_reference.get(t.reference) or by_provider_reference.get(
+                t.provider_reference or "",
+            )
+            if row is None:
+                missing += 1
+                continue
+            used.add(id(row))
+            if row.status == "successful" and row.amount == t.amount:
+                matched += 1
+            else:
+                mismatched += 1
+
+        unclaimed = len([r for r in provider_rows if id(r) not in used])
+
+    else:
+        provider_errors = 0
+        for t in our_txns:
+            try:
+                confirmed = provider.verify_payment(
+                    reference=t.reference,
+                    amount=t.amount,
+                    provider_reference=t.provider_reference,
+                )
+            except PaymentProviderError as e:
+                provider_errors += 1
+                logger.warning(
+                    "[reconciliation] verification failed for %s: %s",
+                    t.reference, e.message,
+                )
+                missing += 1
+                continue
+
+            we_recorded = t.status in (TXN_SUCCESSFUL, TXN_SETTLED)
+            if we_recorded and confirmed:
+                matched += 1
+            elif we_recorded and not confirmed:
+                mismatched += 1
+            elif confirmed and not we_recorded:
+                # Provider says paid but we never recorded it.
+                mismatched += 1
+            else:
+                missing += 1
+
+        if our_txns and provider_errors == len(our_txns):
+            raise ReconciliationError(
+                "Provider verification was unavailable for every transaction.",
+                502,
+            )
 
     batch.matched_count = matched
     batch.missing_in_provider_count = missing
     batch.mismatched_amount_count = mismatched
-    batch.unclaimed_count = 0
+    batch.unclaimed_count = unclaimed
     batch.resolved_count = matched
-    batch.flagged_count = missing + mismatched
+    batch.flagged_count = missing + mismatched + unclaimed
 
 
 # ─────────────────────────────────────────────────────────────────────────

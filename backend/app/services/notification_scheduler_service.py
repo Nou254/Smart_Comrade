@@ -135,8 +135,8 @@ def deliver_due_notifications(
 ) -> dict:
     """
     Pick up all pending notifications whose scheduled_at_utc has arrived
-    and dispatch them. Dispatcher is a stub — real one plugs into the
-    platform's in-app / email / SMS providers.
+    and dispatch them through the platform's in-app / email / SMS
+    providers. Failed notifications are retried up to three times.
     """
     now = _now()
     rows = db.query(FinancialNotification).filter(
@@ -148,7 +148,7 @@ def deliver_due_notifications(
     failed = 0
     for n in rows:
         try:
-            _dispatch(n)
+            _dispatch(db, n)
             n.delivery_status = NOTIF_DELIVERED
             n.delivered_at_utc = now
             n.delivery_attempts = (n.delivery_attempts or 0) + 1
@@ -168,17 +168,84 @@ def deliver_due_notifications(
     return {"delivered": delivered, "failed": failed, "total": len(rows)}
 
 
-def _dispatch(n: FinancialNotification) -> None:
+_DEFAULT_TITLES: dict[str, str] = {
+    "subscription_expiring": "Your subscription is expiring soon",
+    "subscription_expired": "Your subscription has expired",
+    "payment_received": "Payment received",
+    "payment_failed": "Payment failed",
+    "refund_processed": "Refund processed",
+}
+
+
+def _dispatch(db: Session, n: FinancialNotification) -> None:
     """
-    Placeholder dispatcher. Real implementation:
-      - in_app → insert into the platform notification table
-      - email  → enqueue via email provider
-      - sms    → enqueue via SMS provider
+    Deliver one financial notification through its channel:
+      - in_app → persistent notification row (notification_store)
+      - email  → configured email provider
+      - sms    → configured SMS provider
+
+    Raises on failure so the caller can retry and record the error.
     """
-    logger.info(
-        "[notif.dispatch] channel=%s category=%s user=%s payload=%s",
-        n.channel, n.category, n.user_id, n.payload_json,
+    payload = n.payload_json or {}
+    title = payload.get("title") or _DEFAULT_TITLES.get(
+        n.category, "Smart Comrade account update",
     )
+    body = payload.get("body") or _render_body(n, payload)
+
+    if n.channel == CHANNEL_IN_APP:
+        from app.services.notification_store import create_for_users
+        create_for_users(
+            db,
+            user_ids=[n.user_id],
+            category="administrative",
+            title=title,
+            body=body,
+            priority="important" if n.is_urgent else "normal",
+            source_type="financial_notification",
+            source_id=n.id,
+            link_url=payload.get("link_url"),
+            payload_json=payload,
+            is_system_generated=True,
+        )
+        return
+
+    from app.models.user import User
+
+    user = db.query(User).filter(User.id == n.user_id).first()
+    if not user:
+        raise NotificationError(
+            f"User {n.user_id} not found for delivery.", 404,
+        )
+
+    if n.channel == CHANNEL_EMAIL:
+        if not user.email:
+            raise NotificationError("User has no email address.", 400)
+        from app.core.providers import get_email_provider
+        get_email_provider().send(
+            to=user.email,
+            subject=title,
+            html_body=f"<p>{body}</p>",
+            text_body=body,
+        )
+        return
+
+    if n.channel == CHANNEL_SMS:
+        if not user.phone:
+            raise NotificationError("User has no phone number.", 400)
+        from app.core.providers import get_sms_provider
+        get_sms_provider().send(to=user.phone, message=body)
+        return
+
+    raise NotificationError(f"Unknown channel '{n.channel}'.", 400)
+
+
+def _render_body(n: FinancialNotification, payload: dict) -> str:
+    """Compose a readable fallback body when the payload has none."""
+    amount = payload.get("amount")
+    currency = payload.get("currency") or "KES"
+    if amount is not None:
+        return f"{n.category.replace('_', ' ').capitalize()}: {amount} {currency}."
+    return f"{n.category.replace('_', ' ').capitalize()}."
 
 
 # ─────────────────────────────────────────────────────────────────────────

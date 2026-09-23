@@ -9,8 +9,10 @@ Design:
   - Flagged resources remain unpublished and are surfaced to the
     supervisor and the uploading rep.
 
-In V1 the AI scan is STUBBED — it auto-verifies every resource with a
-fixed confidence score. Wiring the real scanner is a Wave D+ task.
+The AI scan is served by the shared LLM client in
+`ai_assistance_service`. A resource only becomes visible once the scan
+marks it verified; a failed or off-topic scan keeps it unpublished and
+surfaces the reason to the uploader and supervisor.
 """
 import logging
 from datetime import datetime, timezone
@@ -111,42 +113,130 @@ def share_resource(
     db.commit()
     db.refresh(resource)
 
-    # Fire the AI scan stub synchronously. In production this becomes
-    # a background task that calls the LLM provider.
+    # Run the AI scan synchronously. In production this becomes a
+    # background task; the publish gate is unchanged either way.
     _ai_scan_resource(db, resource)
     db.refresh(resource)
     return resource
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# AI SCAN STUB
+# AI SCAN
 # ─────────────────────────────────────────────────────────────────────────
+
+_SCAN_SYSTEM = (
+    "You vet shared study resources for a university unit. Decide whether "
+    "the resource is relevant to the given unit and safe to publish to "
+    "students. Respond with JSON only."
+)
+
 
 def _ai_scan_resource(
     db: Session, resource: UnitSharedResource,
 ) -> UnitSharedResource:
     """
-    V1 stub — auto-verifies every resource with a fixed confidence score.
-    The real scanner will:
-      1. Extract text from the resource (PDF, doc, link scrape, code)
-      2. Compare it against the unit's title, code, and learning outcomes
-      3. Return a relevance score + explanation
-      4. Mark verified or flagged
+    Scan a resource for relevance to its unit offering and publish it if
+    it passes. A resource that fails the scan stays unpublished.
     """
+    from app.core.config import settings
+
     now = _now()
-    resource.ai_scan_status = SCAN_VERIFIED
-    resource.ai_scan_confidence = 0.95
-    resource.ai_scan_notes = (
-        "V1 stub — AI scanner not yet wired. Auto-verified at 0.95. "
-        "Real scan will affirm unit relevance against the offering's "
-        "learning outcomes."
-    )
+    result = _scan_with_ai(db, resource)
+    confidence = result["confidence"]
+    threshold = settings.AI_RESOURCE_MIN_CONFIDENCE
+
+    resource.ai_scan_confidence = confidence
+    resource.ai_scan_notes = result["notes"]
     resource.ai_scanned_at = now
-    resource.is_published = True
-    resource.published_at = now
+
+    if result["failed"]:
+        resource.ai_scan_status = SCAN_FAILED
+        resource.is_published = False
+    elif result["relevant"] and confidence >= threshold:
+        resource.ai_scan_status = SCAN_VERIFIED
+        resource.is_published = True
+        resource.published_at = now
+    else:
+        resource.ai_scan_status = SCAN_FLAGGED
+        resource.is_published = False
+
     db.commit()
     db.refresh(resource)
     return resource
+
+
+def _scan_with_ai(db: Session, resource: UnitSharedResource) -> dict:
+    """Run the LLM relevance scan. Never raises."""
+    from app.core.config import settings
+    from app.services.ai_assistance_service import (
+        AIError, _parse_json, chat_completion,
+    )
+    from app.models.academic import Unit
+
+    offering = db.query(UnitOffering).filter(
+        UnitOffering.id == resource.unit_offering_id,
+    ).first()
+    unit = (
+        db.query(Unit).filter(Unit.id == offering.unit_id).first()
+        if offering else None
+    )
+    unit_title = getattr(unit, "name", None) or resource.unit_offering_id
+    unit_code = getattr(unit, "code", None) or ""
+
+    excerpt = (
+        resource.content_text
+        or resource.description
+        or resource.external_url
+        or resource.file_url
+        or ""
+    )[:4000]
+
+    prompt = (
+        f"Unit: {unit_code} {unit_title}\n"
+        f"Resource title: {resource.title}\n"
+        f"Resource type: {resource.resource_type}\n"
+        f"Resource content/excerpt:\n{excerpt}\n\n"
+        "Return JSON of the form "
+        '{"relevant": true|false, "confidence": 0.0-1.0, "notes": "..."}.'
+    )
+
+    try:
+        raw, _usage = chat_completion(
+            prompt=prompt, system=_SCAN_SYSTEM,
+            model=settings.AI_MODEL_MID, json_mode=True,
+        )
+    except AIError as e:
+        logger.warning("[unit_resource] AI scan unavailable: %s", e.message)
+        return {
+            "failed": True, "relevant": False, "confidence": 0.0,
+            "notes": f"AI scan could not run: {e.message}",
+        }
+
+    try:
+        data = _parse_json(raw)
+    except AIError:
+        return {
+            "failed": True, "relevant": False, "confidence": 0.0,
+            "notes": "AI scan returned unparseable output.",
+        }
+
+    if not isinstance(data, dict):
+        return {
+            "failed": True, "relevant": False, "confidence": 0.0,
+            "notes": "AI scan returned an unexpected shape.",
+        }
+
+    try:
+        confidence = float(data.get("confidence", 0.0))
+    except (TypeError, ValueError):
+        confidence = 0.0
+
+    return {
+        "failed": False,
+        "relevant": bool(data.get("relevant")),
+        "confidence": max(0.0, min(1.0, confidence)),
+        "notes": str(data.get("notes") or ""),
+    }
 
 
 def force_rescan(

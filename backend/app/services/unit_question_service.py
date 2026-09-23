@@ -7,8 +7,10 @@ Design:
   - A supervisor may later override the AI response.
   - A rep may pose a question on behalf of an anonymous student.
 
-In V1 the AI research call is STUBBED — it returns a placeholder
-response immediately. Wiring the real LLM provider is a Wave D+ task.
+The AI research call is served by the shared LLM client in
+`ai_assistance_service`. If the provider is unavailable the response is
+still recorded, with confidence 0.0 and a note, so a supervisor can
+follow up instead of the question being left in limbo.
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -100,46 +102,46 @@ def pose_question(
     db.commit()
     db.refresh(question)
 
-    # Fire the AI research stub synchronously for now.
-    # In production this becomes a background task.
+    # Research and respond synchronously. In production this becomes a
+    # background task; the service contract (ai_response_deadline) is
+    # unchanged either way.
     _ai_research_and_respond(db, question)
     db.refresh(question)
     return question
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# AI RESEARCH STUB
+# AI RESEARCH
 # ─────────────────────────────────────────────────────────────────────────
+
+_AI_SYSTEM = (
+    "You are a subject-matter tutor researching a student's academic "
+    "question. Answer accurately and concisely, grounded in the unit "
+    "context you are given. If you are unsure, say so. Respond with JSON "
+    "only."
+)
+
 
 def _ai_research_and_respond(
     db: Session, question: UnitQuestion,
 ) -> UnitQuestionResponse:
     """
-    Stub for the AI research + response flow. In production this hits an
-    LLM provider with a structured prompt grounded in the unit's learning
-    materials. For V1 it returns a placeholder immediately.
+    Research and answer a unit question with the LLM.
 
     The 5-minute deadline is enforced by the service contract:
     ai_responded_at is stamped at write time, and the analytics layer
     alerts if any question's response lands after ai_response_deadline.
     """
     now = _now()
+    content, sources, confidence = _research(db, question)
+
     response = UnitQuestionResponse(
         question_id=question.id,
         responder_type="ai",
         responder_user_id=None,
-        content=(
-            "[AI Assistant — V1 stub]\n\n"
-            f"Question received: {question.subject}\n\n"
-            "The AI research module is not yet wired to an LLM provider. "
-            "Once enabled, this response will contain a researched answer "
-            "with citations from the unit's learning materials and "
-            "reference sources.\n\n"
-            "A Unit Supervisor has been notified and may override this "
-            "response."
-        ),
-        research_sources_json=[],
-        confidence_score=0.0,
+        content=content,
+        research_sources_json=sources,
+        confidence_score=confidence,
     )
     db.add(response)
     question.ai_responded_at = now
@@ -147,6 +149,64 @@ def _ai_research_and_respond(
     db.commit()
     db.refresh(response)
     return response
+
+
+def _research(db: Session, question: UnitQuestion) -> tuple[str, list, float]:
+    """Run the LLM research call. Never raises — degrades to a note."""
+    from app.core.config import settings
+    from app.services.ai_assistance_service import (
+        AIError, _parse_json, chat_completion,
+    )
+
+    unit_label = question.unit_offering_id
+    offering = db.query(UnitOffering).filter(
+        UnitOffering.id == question.unit_offering_id,
+    ).first()
+    if offering is not None:
+        unit_label = getattr(offering, "unit_id", None) or unit_label
+
+    prompt = (
+        f"Unit offering: {unit_label}\n"
+        f"Category: {question.category}\n"
+        f"Subject: {question.subject}\n\n"
+        f"Question:\n{question.question_text}\n\n"
+        "Return JSON of the form "
+        '{"answer": "...", "sources": ["..."], "confidence": 0.0-1.0}.'
+    )
+
+    try:
+        raw, _usage = chat_completion(
+            prompt=prompt, system=_AI_SYSTEM,
+            model=settings.AI_MODEL_MID, json_mode=True,
+        )
+    except AIError as e:
+        logger.warning("[unit_question] AI research unavailable: %s", e.message)
+        return (
+            "The AI research service is currently unavailable, so no "
+            "researched answer could be produced for this question. A Unit "
+            "Supervisor has been notified and will respond.\n\n"
+            f"Question received: {question.subject}",
+            [],
+            0.0,
+        )
+
+    try:
+        data = _parse_json(raw)
+    except AIError:
+        return (raw.strip(), [], 0.5)
+
+    if not isinstance(data, dict):
+        return (str(data), [], 0.5)
+
+    content = str(data.get("answer") or raw).strip()
+    sources = data.get("sources") or []
+    if not isinstance(sources, list):
+        sources = [str(sources)]
+    try:
+        confidence = float(data.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        confidence = 0.5
+    return (content, sources, max(0.0, min(1.0, confidence)))
 
 
 # ─────────────────────────────────────────────────────────────────────────

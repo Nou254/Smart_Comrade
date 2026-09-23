@@ -40,6 +40,69 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# ───────────────────────────────────────────────────────────────────────
+# FEE AMOUNTS + PROVIDER VERIFICATION
+# ───────────────────────────────────────────────────────────────────────
+
+_NOMINATION_TYPE_BY_LEVEL: dict[str, str] = {
+    "school": TXN_NOMINATION_SCHOOL,
+    "institution": TXN_NOMINATION_INSTITUTION,
+    "county": TXN_NOMINATION_COUNTY,
+}
+
+
+def nomination_fee_amount(level: str) -> int:
+    """Fee (KES) for a nomination at the given election level."""
+    txn_type = _NOMINATION_TYPE_BY_LEVEL.get(level)
+    if not txn_type:
+        raise FeeError(f"Unknown nomination level '{level}'.", 400)
+    return FEE_AMOUNTS[txn_type]
+
+
+def transfer_fee_amount(transfer_type: str) -> int:
+    """Fee (KES) for an inter-group transfer."""
+    if transfer_type == "elected":
+        return FEE_AMOUNTS[TXN_TRANSFER_ELECTED]
+    if transfer_type == "ordinary":
+        return FEE_AMOUNTS[TXN_TRANSFER_ORDINARY]
+    raise FeeError("transfer_type must be 'ordinary' or 'elected'.", 400)
+
+
+def verify_payment_reference(
+    *, provider_name: str, reference: str, amount: int,
+) -> bool:
+    """
+    Confirm with the payment provider that `reference` is a successful
+    payment of `amount`. Raises FeeError if the provider cannot be reached
+    or does not recognise/confirm the reference.
+
+    This is what lets fee-recording endpoints accept a client-supplied
+    reference without trusting it blindly.
+    """
+    from app.services.payment_provider_service import (
+        get_provider, PaymentProviderError,
+    )
+
+    provider = get_provider(provider_name)
+    try:
+        confirmed = provider.verify_payment(
+            reference=reference, amount=amount,
+        )
+    except PaymentProviderError as e:
+        raise FeeError(
+            f"Could not verify payment with {provider_name}: {e.message}",
+            e.status_code,
+        )
+
+    if not confirmed:
+        raise FeeError(
+            f"Payment reference '{reference}' was not confirmed by "
+            f"{provider_name}.",
+            409,
+        )
+    return True
+
+
 # ─────────────────────────────────────────────────────────────────────────
 # NOMINATION FEES
 # ─────────────────────────────────────────────────────────────────────────
@@ -51,14 +114,9 @@ def initiate_nomination_fee(
     payer_email: str | None = None,
     ip: str | None = None, ua: str | None = None,
 ):
-    type_map = {
-        "school": TXN_NOMINATION_SCHOOL,
-        "institution": TXN_NOMINATION_INSTITUTION,
-        "county": TXN_NOMINATION_COUNTY,
-    }
-    if level not in type_map:
+    if level not in _NOMINATION_TYPE_BY_LEVEL:
         raise FeeError(f"Unknown nomination level '{level}'.", 400)
-    txn_type = type_map[level]
+    txn_type = _NOMINATION_TYPE_BY_LEVEL[level]
     return initiate_transaction(
         db,
         transaction_type=txn_type,

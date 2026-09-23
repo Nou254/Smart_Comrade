@@ -470,14 +470,27 @@ def post_candidate_fee(
     election_id: str,
     candidate_id: str,
     payment_reference: str = Query(..., min_length=3, max_length=128),
+    provider: str = Query(
+        "mpesa", description="Payment provider that took the nomination fee.",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Record a nomination fee payment. Stub until M-Pesa integration lands
-    — in production this only succeeds when a verified webhook arrives.
+    Record a nomination fee payment after the provider confirms it.
+
+    The fee is only recorded once the payment provider verifies that
+    `payment_reference` is a successful payment for the correct amount.
     """
+    from app.services.fee_service import (
+        FeeError, nomination_fee_amount, verify_payment_reference,
+    )
     try:
+        election = db.query(Election).filter(
+            Election.id == election_id,
+        ).first()
+        if not election:
+            raise ElectionError("Election not found.", 404)
         candidate = db.query(ElectionCandidate).filter(
             ElectionCandidate.id == candidate_id,
             ElectionCandidate.election_id == election_id,
@@ -488,8 +501,16 @@ def post_candidate_fee(
             raise HTTPException(
                 403, "You can only pay your own nomination fee.",
             )
+        if candidate.fee_paid:
+            return candidate
+
+        verify_payment_reference(
+            provider_name=provider,
+            reference=payment_reference,
+            amount=nomination_fee_amount(election.level),
+        )
         return record_nomination_fee(db, candidate_id, payment_reference)
-    except ElectionError as e:
+    except (ElectionError, FeeError) as e:
         _err(e)
 
 

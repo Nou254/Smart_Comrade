@@ -11,6 +11,13 @@ from app.api import (
     financial,
     webhooks,
     unit_representation,
+    assessment,
+    # Communication module — new
+    messages,
+    announcements,
+    notifications,
+    files,
+    forums,
 )
 from app.core.config import settings
 
@@ -48,9 +55,19 @@ app.include_router(activity_club.router)
 # Module 004
 app.include_router(unit_representation.router)
 
+# Module 005
+app.include_router(assessment.router)
+
 # Module 012
 app.include_router(financial.router)
 app.include_router(webhooks.router)
+
+# Communication module — new
+app.include_router(messages.router)
+app.include_router(announcements.router)
+app.include_router(notifications.router)
+app.include_router(files.router)
+app.include_router(forums.router)
 
 
 @app.get("/health", tags=["Health"])

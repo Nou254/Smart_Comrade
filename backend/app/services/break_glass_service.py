@@ -8,8 +8,11 @@ For 2-of-2, Shamir's Secret Sharing reduces mathematically to XOR:
     share_b = token XOR share_a
     token   = share_a XOR share_b
 
-Neither share alone reveals anything about the token (indistinguishable
-from random). Both shares are required to reconstruct.
+Neither share alone reveals anything about the token. Both shares are
+required to reconstruct.
+
+Communication module:
+  - emergency account is created with an auto-assigned username.
 """
 from __future__ import annotations
 
@@ -65,12 +68,20 @@ def _ensure_emergency_account(db: Session) -> User:
     user = db.query(User).filter(User.email == EMERGENCY_EMAIL).first()
     if user:
         return user
+
+    # --- Communication module: assign username at creation ---
+    from app.services.username_service import generate_unique_username
+    username = generate_unique_username(
+        db, first_name="Emergency", last_name="Access",
+    )
+
     user = User(
         first_name="Emergency",
         last_name="Access",
         email=EMERGENCY_EMAIL,
         phone=None,
-        password_hash=hash_password(secrets.token_urlsafe(48)),  # never used
+        username=username,
+        password_hash=hash_password(secrets.token_urlsafe(48)),
         user_type="admin",
         account_status="active",
         email_verified=True,
@@ -80,7 +91,6 @@ def _ensure_emergency_account(db: Session) -> User:
     db.add(user)
     db.flush()
 
-    # Grant super_admin at platform scope
     role = db.query(Role).filter(Role.code == "super_admin").first()
     if role:
         now = datetime.now(timezone.utc)
@@ -239,14 +249,12 @@ def unlock(db: Session, share_a_b64: str, share_b_b64: str, reason: str,
 
     emergency = _ensure_emergency_account(db)
 
-    # Revoke any prior break-glass session before issuing a new one
     db.query(SessionModel).filter(
         SessionModel.user_id == emergency.id,
         SessionModel.is_break_glass.is_(True),
         SessionModel.is_revoked.is_(False),
     ).update({"is_revoked": True, "revoked_at": datetime.now(timezone.utc)})
 
-    # Enforce concurrent session limit (regular path)
     if _count_active_sessions(db, emergency.id) >= 5:
         _evict_oldest_session(db, emergency.id)
 

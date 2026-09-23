@@ -7,7 +7,7 @@ their preferences (except for security-critical events).
 Combines:
   - Email (via provider registry)
   - SMS (via provider registry)
-  - In-app (persisted to notifications table — implemented separately)
+  - In-app (persisted via notification_store)
 """
 from __future__ import annotations
 
@@ -32,6 +32,61 @@ class NotificationError(Exception):
         super().__init__(message)
 
 
+# ============================================================================
+# Notification category inference
+# ============================================================================
+#
+# The Communication module's persistent store categorizes notifications.
+# Existing call sites use `event_key` strings like "assessment.submitted"
+# or "security.new_device". We map the prefix to a canonical category so
+# the store can index and filter correctly.
+
+_EVENT_KEY_TO_CATEGORY: dict[str, str] = {
+    "assessment": "assessment",
+    "election": "election",
+    "impeachment": "impeachment",
+    "event": "event",
+    "announcement": "announcement",
+    "opportunity": "opportunity",
+    "project": "project",
+    "security": "security",
+    "auth": "security",
+    "session": "security",
+    "password": "security",
+    "account": "administrative",
+    "group": "academic",
+    "unit": "academic",
+    "evaluation": "assessment",
+    "finance": "administrative",
+    "subscription": "administrative",
+    "refund": "administrative",
+    "transfer": "administrative",
+    "club": "event",
+    "community": "announcement",
+}
+
+_CRITICAL_CATEGORIES = {"security", "emergency"}
+
+
+def _infer_category(event_key: str | None) -> str:
+    if not event_key:
+        return "system"
+    prefix = event_key.split(".", 1)[0].lower()
+    return _EVENT_KEY_TO_CATEGORY.get(prefix, "system")
+
+
+def _infer_priority(category: str, *, force_urgent: bool = False) -> str:
+    if force_urgent or category in _CRITICAL_CATEGORIES:
+        return "critical"
+    if category in ("election", "impeachment", "assessment"):
+        return "important"
+    return "normal"
+
+
+# ============================================================================
+# Public API
+# ============================================================================
+
 def notify_user(
     db: Session,
     *,
@@ -42,6 +97,10 @@ def notify_user(
     sms_body: str | None = None,
     event_key: str | None = None,
     force_send: bool = False,
+    source_type: str | None = None,
+    source_id: str | None = None,
+    link_url: str | None = None,
+    payload: dict | None = None,
 ) -> None:
     """
     Send notification to a user, respecting their preferences.
@@ -49,6 +108,12 @@ def notify_user(
     - force_send=True bypasses preferences (used for security alerts).
     - Mandatory event prefixes also bypass preferences.
     - Non-mandatory events are gated by preference flags.
+    - Every notification is persisted to the Communication store.
+
+    New kwargs (Communication module):
+      - source_type / source_id : loose reference to the triggering entity
+      - link_url                : deep-link target in the UI
+      - payload                 : structured data for the client
     """
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
@@ -67,7 +132,7 @@ def notify_user(
         )
         return
 
-    # ── Email ──────────────────────────────────────────────
+    # ── Email ──────────────────────────────────────────────────────────
     if prefs.email_enabled or mandatory:
         if user.email and html_body:
             try:
@@ -80,7 +145,7 @@ def notify_user(
             except Exception:
                 logger.exception("Email delivery failed for %s", user.email)
 
-    # ── SMS ────────────────────────────────────────────────
+    # ── SMS ────────────────────────────────────────────────────────────
     if (prefs.sms_enabled or mandatory) and sms_body:
         if user.phone:
             try:
@@ -88,13 +153,47 @@ def notify_user(
             except Exception:
                 logger.exception("SMS delivery failed for %s", user.phone)
 
-    # ── In-app ─────────────────────────────────────────────
-    # Persistence to a notifications table is handled elsewhere.
-    # Left as a hook here so future code doesn't forget.
-    _persist_in_app(db, user_id=user_id, subject=subject, body=text_body or html_body)
+    # ── In-app (persistent) ────────────────────────────────────────────
+    _persist_in_app(
+        db,
+        user_id=user_id,
+        subject=subject,
+        body=text_body or html_body,
+        event_key=event_key,
+        source_type=source_type,
+        source_id=source_id,
+        link_url=link_url,
+        payload=payload,
+        force_urgent=mandatory and (event_key or "").startswith("security."),
+    )
 
 
-# ── Helpers ────────────────────────────────────────────────
+# ============================================================================
+# Helpers
+# ============================================================================
+
+def users_with_roles(db: Session, role_codes: tuple[str, ...]) -> list[str]:
+    """
+    Return the ids of users holding any of the given role codes with an
+    active, non-expired assignment. Used by services that notify role
+    holders rather than named users.
+    """
+    from datetime import datetime, timezone
+
+    from app.models.role import Role, UserRole
+
+    now = datetime.now(timezone.utc)
+    rows = (
+        db.query(UserRole)
+        .join(Role, UserRole.role_id == Role.id)
+        .filter(Role.code.in_(role_codes), UserRole.status == "active")
+        .all()
+    )
+    return [
+        r.user_id for r in rows
+        if r.end_date is None or r.end_date > now
+    ]
+
 
 def _get_or_create_prefs(db: Session, user_id: str) -> NotificationPreference:
     prefs = (
@@ -135,14 +234,44 @@ def _allowed_by_prefs(prefs: NotificationPreference, event_key: str | None) -> b
 
 
 def _persist_in_app(
-    db: Session, *, user_id: str, subject: str, body: str | None
+    db: Session,
+    *,
+    user_id: str,
+    subject: str,
+    body: str | None,
+    event_key: str | None = None,
+    source_type: str | None = None,
+    source_id: str | None = None,
+    link_url: str | None = None,
+    payload: dict | None = None,
+    force_urgent: bool = False,
 ) -> None:
     """
-    Hook for persisting in-app notifications. Currently a no-op —
-    will be wired when the notifications table is introduced.
+    Persist an in-app notification via the Communication store.
+
+    Wrapped in try/except so that a failure to persist never blocks the
+    caller. Email/SMS already fired; the store is best-effort.
     """
     try:
-        # Placeholder until notifications table exists
-        pass
+        from app.services.notification_store import create_for_users
+
+        category = _infer_category(event_key)
+        priority = _infer_priority(category, force_urgent=force_urgent)
+
+        create_for_users(
+            db,
+            user_ids=[user_id],
+            category=category,
+            title=subject,
+            body=body or subject,
+            priority=priority,
+            source_type=source_type,
+            source_id=source_id,
+            link_url=link_url,
+            payload_json=payload,
+            is_system_generated=True,
+        )
     except Exception:
-        logger.exception("Failed to persist in-app notification for %s", user_id)
+        logger.exception(
+            "Failed to persist in-app notification for %s", user_id,
+        )

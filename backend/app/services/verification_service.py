@@ -13,6 +13,9 @@ Bootstrap admin elevation:
 Lecturer affiliations:
   On promotion of a lecturer, a LecturerAffiliation row is created from the
   referee data captured in the cache record.
+
+Communication module:
+  Username is assigned on user promotion (see _promote_pending_to_user).
 """
 import logging
 from datetime import datetime, timedelta, timezone
@@ -183,11 +186,18 @@ def verify_pending_registration(db: Session, email: str, otp: str) -> User:
         or (user_type == "external" and external_subtype == "alumni")
     )
 
+    # --- Communication module: assign username at creation ---
+    from app.services.username_service import generate_unique_username
+    username = generate_unique_username(
+        db, first_name=record["first_name"], last_name=record["last_name"],
+    )
+
     user = User(
         first_name=record["first_name"],
         last_name=record["last_name"],
         email=record["email"],
         phone=record.get("phone"),
+        username=username,
         password_hash=record["password_hash"],
         user_type=user_type,
         external_subtype=external_subtype,
@@ -248,8 +258,6 @@ def verify_pending_registration(db: Session, email: str, otp: str) -> User:
         db.add(profile)
 
     # --- Lecturer affiliation (only for lecturers) ---
-    # The first affiliation is created from the cached referee + institution
-    # data. Additional affiliations are added later via POST /lecturers/me/affiliations.
     if user.user_type == "lecturer":
         extra = record.get("extra") or {}
         if extra.get("referee_name") and user.institution_id:

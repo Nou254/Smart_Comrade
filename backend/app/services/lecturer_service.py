@@ -5,6 +5,7 @@ Self-service CRUD for the lecturer, plus admin verification queue.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -15,6 +16,9 @@ from app.models.academic import Institution
 from app.models.lecturer_affiliation import LecturerAffiliation
 from app.schemas.lecturer import LecturerAffiliationCreate
 from app.services.audit_service import log_auth_event
+
+
+logger = logging.getLogger(__name__)
 
 
 class LecturerError(Exception):
@@ -228,6 +232,29 @@ def _notify_admins_pending_affiliation(
     db: Session, aff: LecturerAffiliation, lecturer: User,
 ) -> None:
     """Best-effort notification to Super Admins about a pending affiliation."""
-    # Placeholder — will wire to admin notification channel in a later round.
-    # For now, the audit event is the record.
-    return
+    try:
+        from app.services.notification_service import (
+            notify_user, users_with_roles,
+        )
+
+        name = f"{lecturer.first_name} {lecturer.last_name}".strip()
+        subject = "Lecturer affiliation pending verification"
+        body = (
+            f"{name or lecturer.email} requested lecturer affiliation with "
+            f"institution {aff.institution_id}. Please review and verify it."
+        )
+        for uid in users_with_roles(db, ("super_admin",)):
+            notify_user(
+                db,
+                user_id=uid,
+                subject=subject,
+                text_body=body,
+                html_body=f"<p>{body}</p>",
+                event_key="account.lecturer_affiliation_pending",
+                source_type="lecturer_affiliation",
+                source_id=aff.id,
+            )
+    except Exception:
+        logger.exception(
+            "[lecturer.notify] admin notification failed for %s", aff.id,
+        )

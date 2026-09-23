@@ -487,13 +487,17 @@ def calculate_subscription(
 def renew_subscription(
     group_id: str,
     payload: SubscriptionRenewRequest,
+    provider: str = Query(
+        "mpesa", description="Payment provider that took the renewal.",
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """
-    Record a manual renewal. Stub until M-Pesa integration lands — in
-    production this endpoint will only succeed when a verified payment
-    webhook has landed.
+    Renew the group subscription after the provider confirms payment.
+
+    The renewal is only recorded once the payment provider verifies that
+    the supplied reference is a successful payment for the correct amount.
     """
     try:
         group = get_group(db, group_id)
@@ -503,6 +507,15 @@ def renew_subscription(
                 raise HTTPException(
                     403, "Only the founder or leader may renew the subscription."
                 )
+
+        from app.services.fee_service import (
+            FeeError, verify_payment_reference,
+        )
+        verify_payment_reference(
+            provider_name=provider,
+            reference=payload.payment_reference,
+            amount=calculate_amount(group.member_count),
+        )
 
         # Expire any prior subscription that is still open
         from app.services.group_subscription_service import (
@@ -518,7 +531,7 @@ def renew_subscription(
             member_count=group.member_count,
             payment_reference=payload.payment_reference,
         )
-    except (GroupError, SubscriptionError) as e:
+    except (GroupError, SubscriptionError, FeeError) as e:
         _err(e)
     return sub
 

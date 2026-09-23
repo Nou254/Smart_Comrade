@@ -49,7 +49,7 @@ def _process_webhook(
     except PaymentProviderError as e:
         raise HTTPException(e.status_code, e.message)
 
-    if not event.reference:
+    if not event.reference and not event.provider_reference:
         raise HTTPException(400, "Missing reference in webhook.")
 
     # --- Refund webhook? ---
@@ -67,15 +67,25 @@ def _process_webhook(
         return {"ok": True, "kind": "refund"}
 
     # --- Payment webhook ---
-    txn = db.query(Transaction).filter(
-        Transaction.reference == event.reference,
-    ).first()
+    txn = None
+    if event.reference:
+        txn = db.query(Transaction).filter(
+            Transaction.reference == event.reference,
+        ).first()
+    if not txn and event.provider_reference:
+        # Some providers (M-Pesa) echo only their own reference back.
+        txn = db.query(Transaction).filter(
+            Transaction.provider_reference == event.provider_reference,
+        ).first()
     if not txn:
         logger.warning(
-            "[webhook.%s] unknown reference %s", provider_name, event.reference,
+            "[webhook.%s] unknown reference %s (provider_ref=%s)",
+            provider_name, event.reference, event.provider_reference,
         )
         # Ack anyway to prevent provider retries storm
         return {"ok": True, "kind": "unknown_reference"}
+
+    platform_ref = txn.reference
 
     # Idempotency — already terminal?
     if txn.status in (TXN_SUCCESSFUL, TXN_SETTLED):
@@ -88,7 +98,7 @@ def _process_webhook(
             provider_name, txn.amount, event.amount, event.reference,
         )
         mark_failed(
-            db, event.reference,
+            db, platform_ref,
             reason=f"Amount mismatch (expected {txn.amount}, got {event.amount}).",
             provider_payload=event.raw_payload,
         )
@@ -106,7 +116,7 @@ def _process_webhook(
         )
 
         mark_successful(
-            db, event.reference,
+            db, platform_ref,
             provider_payload=event.raw_payload,
             provider_reference=event.provider_reference,
         )
@@ -137,7 +147,7 @@ def _process_webhook(
 
     if event.status == "failed":
         mark_failed(
-            db, event.reference,
+            db, platform_ref,
             reason=raw.get("reason", "Provider reported failure."),
             provider_payload=event.raw_payload,
         )

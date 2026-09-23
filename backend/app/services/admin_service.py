@@ -1,5 +1,8 @@
 """
 Admin provisioning, suspend/reactivate, invitation lifecycle, user deletion.
+
+Communication module:
+  - accept_invitation assigns a username at user creation.
 """
 from datetime import datetime, timedelta, timezone
 
@@ -32,7 +35,7 @@ class AdminError(Exception):
 
 
 INVITATION_EXPIRY_DAYS = 7
-DELETION_RETENTION_DAYS = 30  # soft-delete window
+DELETION_RETENTION_DAYS = 30
 
 
 # ============================================================================
@@ -40,13 +43,6 @@ DELETION_RETENTION_DAYS = 30  # soft-delete window
 # ============================================================================
 
 def _user_type_for_role(role_code: str) -> str:
-    """
-    Map a role code to the appropriate user_type value.
-      - N.O.U.-appointed admin   → "admin"
-      - elected representative   → "representative"
-      - academic staff           → "lecturer"
-      - everything else          → "external"
-    """
     if role_code in APPOINTED_ADMIN_ROLES:
         return "admin"
     if role_code in ELECTED_REPRESENTATIVE_ROLES:
@@ -143,14 +139,20 @@ def accept_invitation(
     if not role:
         raise AdminError("Invitation role no longer exists.", 404)
 
-    # FIX: derive user_type from the invited role's category.
     user_type = _user_type_for_role(inv.role_code)
+
+    # --- Communication module: assign username at creation ---
+    from app.services.username_service import generate_unique_username
+    username = generate_unique_username(
+        db, first_name=first_name, last_name=last_name,
+    )
 
     user = User(
         first_name=first_name.strip(),
         last_name=last_name.strip(),
         email=inv.email,
         phone=phone.strip() if phone else None,
+        username=username,
         password_hash=hash_password(password),
         user_type=user_type,
         account_status="active",
@@ -213,7 +215,6 @@ def suspend_user(
         ip_address=ip, user_agent=ua,
     )
 
-    # Notify
     try:
         from app.core.notifications import send_account_suspended_email
         send_account_suspended_email(user.email, user.first_name, reason)
@@ -257,11 +258,6 @@ def delete_user(
     reason: str, confirm_email: str,
     ip: str | None = None, ua: str | None = None,
 ) -> dict:
-    """
-    Permanently delete a user.
-    Removes: user row, roles, sessions, verifications, 2FA, external profile.
-    Preserves: audit logs (they cascade on delete only for the actor).
-    """
     user = db.query(User).filter(User.id == target_user_id).first()
     if not user:
         raise AdminError("User not found.", 404)
@@ -270,7 +266,6 @@ def delete_user(
     if confirm_email.lower().strip() != user.email.lower().strip():
         raise AdminError("Confirmation email does not match target user.", 400)
 
-    # Log BEFORE deletion (so actor_id is preserved)
     log_admin_action(
         db, actor_id=actor_id, action="user.delete",
         target_type="user", target_id=user.id,
@@ -282,10 +277,8 @@ def delete_user(
     deleted_email = user.email
     deleted_id = user.id
 
-    # Revoke all sessions first
     revoke_all_other_sessions(db, user.id, keep_token=None)
 
-    # Delete related records explicitly (in case DB doesn't cascade)
     db.query(BackupCode).filter(BackupCode.user_id == user.id).delete()
     db.query(TwoFactorChallenge).filter(TwoFactorChallenge.user_id == user.id).delete()
     db.query(EmailVerification).filter(EmailVerification.user_id == user.id).delete()
@@ -295,7 +288,6 @@ def delete_user(
     db.query(ExternalProfile).filter(ExternalProfile.user_id == user.id).delete()
     db.query(UserRole).filter(UserRole.user_id == user.id).delete()
 
-    # Delete user
     db.delete(user)
     db.commit()
 
@@ -313,7 +305,6 @@ def delete_user(
 def self_deactivate(
     db: Session, user: User, password: str, reason: str | None = None,
 ) -> User:
-    """User-initiated deactivation with 30-day grace period."""
     if not verify_password(password, user.password_hash):
         raise AdminError("Password is incorrect.", 400)
 
@@ -337,7 +328,6 @@ def self_deactivate(
 def self_reactivate(
     db: Session, email: str, password: str,
 ) -> User:
-    """Reactivation within grace period."""
     user = db.query(User).filter(User.email == email.lower().strip()).first()
     if not user:
         raise AdminError("User not found.", 404)

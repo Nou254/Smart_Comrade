@@ -9,6 +9,13 @@ Module 012 addition:
   - timezone : IANA timezone string (default Africa/Nairobi). Used by the
     financial notification scheduler to deliver messages at the user's
     local hour, respecting a 21:00–07:00 sleep window.
+
+Communication module additions:
+  - username            : auto-assigned, unique handle for public display.
+                          Populated by the calling service via
+                          username_service.generate_unique_username(db).
+  - profile_visibility  : public | private. Private users still accept
+                          contact requests, but profile fields are hidden.
 """
 from datetime import datetime
 
@@ -17,6 +24,9 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin, UUIDMixin
+
+
+VALID_PROFILE_VISIBILITIES = ("public", "private")
 
 
 class User(Base, UUIDMixin, TimestampMixin):
@@ -33,10 +43,21 @@ class User(Base, UUIDMixin, TimestampMixin):
         String(20), unique=True, nullable=True
     )
 
+    # --- Public handle (Communication module) ---
+    # Populated at creation time by username_service.generate_unique_username.
+    # Unique across the platform. Never user-editable in V1.
+    username: Mapped[str | None] = mapped_column(
+        String(64), unique=True, index=True, nullable=True,
+    )
+
+    # --- Profile visibility (Communication module) ---
+    # public  : profile fields are visible to other users
+    # private : profile fields hidden; contact requests still arrive
+    profile_visibility: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="private", index=True,
+    )
+
     # --- Locale (Module 012) ---
-    # IANA timezone (e.g. "Africa/Nairobi", "America/New_York"). Used by
-    # the financial notification scheduler to compute delivery time in
-    # the user's local clock. Defaults to Kenya.
     timezone: Mapped[str] = mapped_column(
         String(64), nullable=False, default="Africa/Nairobi",
         server_default="Africa/Nairobi",
@@ -62,7 +83,6 @@ class User(Base, UUIDMixin, TimestampMixin):
     )
 
     # --- Account Status ---
-    # pending | pending_approval | active | suspended | deactivated | rejected
     account_status: Mapped[str] = mapped_column(
         String(20), default="pending", nullable=False, index=True
     )
@@ -72,14 +92,9 @@ class User(Base, UUIDMixin, TimestampMixin):
     phone_verified: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     # --- Registration Number (Module 002 completion) ---
-    # Optional per-institution student registration number supplied at
-    # registration or later. Used by the pair-based verification system
-    # which matches (reg_number, email) against an institution's roster.
     registration_number: Mapped[str | None] = mapped_column(
         String(64), nullable=True, index=True,
     )
-    # Cached pair-verification state — set true once the pair has been
-    # matched against the institution's roster.
     registration_number_verified: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False, index=True,
     )
@@ -149,4 +164,7 @@ class User(Base, UUIDMixin, TimestampMixin):
     )
 
     def __repr__(self) -> str:
-        return f"<User {self.email} ({self.user_type}:{self.account_status})>"
+        return (
+            f"<User {self.username or self.email} "
+            f"({self.user_type}:{self.account_status})>"
+        )

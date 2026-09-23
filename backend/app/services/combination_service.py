@@ -44,29 +44,46 @@ def _notify_higher_admins_for_combination(
     """
     Notification-only workflow: Regional + Super are informed; County is
     skipped (per canonical spec).
-
-    Currently a stub that logs the event. When the notification service
-    exposes a general dispatch helper, replace the log calls with actual
-    dispatches to the Regional and Super recipients.
     """
-    try:
-        course = db.query(Course).filter(Course.id == combination.course_id).first()
-        school = db.query(School).filter(School.id == course.school_id).first() if course else None
-        institution = (
-            db.query(Institution).filter(Institution.id == school.institution_id).first()
-            if school else None
-        )
-    except Exception:
-        course = school = institution = None
-
-    logger.info(
-        "[combination.notify] combination=%s course=%s institution=%s actor=%s "
-        "→ notify: regional_admin, super_admin (county_representative skipped)",
-        combination.id,
-        getattr(course, "code", None),
-        getattr(institution, "code", None),
-        actor_id,
+    course = db.query(Course).filter(Course.id == combination.course_id).first()
+    school = (
+        db.query(School).filter(School.id == course.school_id).first()
+        if course else None
     )
+    institution = (
+        db.query(Institution).filter(Institution.id == school.institution_id).first()
+        if school else None
+    )
+
+    try:
+        from app.services.notification_service import (
+            notify_user, users_with_roles,
+        )
+
+        recipients = users_with_roles(db, ("regional_admin", "super_admin"))
+        subject = f"New combination added: {combination.code}"
+        body = (
+            f"Combination '{combination.name}' ({combination.code}) was added "
+            f"to course {getattr(course, 'code', combination.course_id)} "
+            f"at {getattr(institution, 'name', 'their institution')}."
+        )
+        for uid in recipients:
+            if uid == actor_id:
+                continue
+            notify_user(
+                db,
+                user_id=uid,
+                subject=subject,
+                text_body=body,
+                html_body=f"<p>{body}</p>",
+                event_key="group.combination.created",
+                source_type="combination",
+                source_id=combination.id,
+            )
+    except Exception:
+        logger.exception(
+            "[combination.notify] dispatch failed for %s", combination.id,
+        )
 
 
 # ============================================================================
